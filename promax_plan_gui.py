@@ -1143,6 +1143,15 @@ class App(object):
         #   全部       = 全部已完成频点 / 全部选中表的频点总数（**按频道数加权**）
         self._build_progress(body)
 
+        # ---- 右列（输出文件 / 已选频道表）：先建、先 pack ----
+        # 🔴 必须**先 pack right 再 pack left**：Tk 的 packer 按 pack 顺序分配空间，
+        #    先 pack 的先拿到自己的请求宽度，剩余才给后面；空间不够时压缩**最后** pack 的。
+        #    顺序反了，窗口一窄就先压缩右列（实测 macOS 1280 下只剩 174px，内容全被裁）。
+        #    左列是可伸缩的树 + 按钮，让它承担压缩才合理。
+        right = ttk.Frame(body)
+        right.pack(side="right", fill="y", padx=8)
+        self.right_col = right          # 供测试/探针定位
+
         left = ttk.Frame(body)
         left.pack(side="left", fill="both", expand=True)
 
@@ -1174,10 +1183,6 @@ class App(object):
 
         self.sel_lbl = tk.StringVar(value="已选 0 个")
         ttk.Label(left, textvariable=self.sel_lbl).pack(anchor="w", pady=(6, 0))
-
-        right = ttk.Frame(body, width=330)
-        right.pack(side="right", fill="y", padx=8)
-        right.pack_propagate(False)
 
         ttk.Label(right, text="输出文件").pack(anchor="w")
         ttk.Label(right, text="默认目录：系统下载文件夹（注册表读取）",
@@ -1213,6 +1218,18 @@ class App(object):
         self.sel_box.pack(fill="both", expand=True, pady=4)
         ttk.Label(right, text="▶ 正在测试    ✓ 已完成",
                   foreground="#777").pack(anchor="w")
+
+        # ---- 右列宽度：交给 Tk 按**当前字体**自己算，不写死像素 ----
+        # 以前写死 width=330，那是个只在 Windows（Segoe UI 9pt）成立的值：
+        # 同样 N 个字符，macOS（Helvetica 13pt）/ Linux 各发行版字体能宽 30% 以上，
+        # Mac 上「目录框 30 字符 + 浏览按钮」实测要 451px —— 330 的画框根本装不下，
+        # 内容被裁、右边还会被挤出可视区。
+        # 做法：**不设固定宽度、也不关几何传播**，让画框始终等于内容按当前字体
+        # 算出的自然宽度（这个值已含当前主题的 padding，比自己 font.measure("0")×N
+        # 更准）。好处是改了系统字号/DPI 之后 Tk 会自己重算，不需要重启程序。
+        # ⚠️ 「不被挤扁」靠的是上面先 pack right 的顺序 ——
+        #    pack_propagate(False) 只挡"子控件把画框撑大"，挡不住"被 pack 压缩"。
+        # 想查"当前字体下这一列需要多宽"：self.right_col.winfo_reqwidth()
 
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", pady=4)
         bot = ttk.Frame(self.root, padding=8)
