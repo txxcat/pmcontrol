@@ -62,3 +62,9 @@ _procs.txt
 _probe.py
 _thumbs.db
 desktop.ini
+
+# 例外：真机协议探测脚本**要**随仓库分发（给现场的人跑）
+!_probe_io.py
+
+# 真机探测输出目录（含仪器上的真实频道表名与表内容）
+probe-*/
