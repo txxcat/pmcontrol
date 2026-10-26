@@ -2993,12 +2993,26 @@ def main():
 
     src = args.source
     if not (os.path.isdir(src) or os.path.isfile(src)):
-        here = os.path.dirname(os.path.abspath(__file__))
+        # 🔴 onefile 打包后 __file__ 指向临时解压目录（_MEIPASS），那里没有 CH；
+        #    必须以 exe 自身所在目录为基准。也不能只看 CWD —— 快捷方式的
+        #    "起始位置"是可以改的，双击和快捷方式启动 CWD 未必是 exe 目录。
+        if getattr(sys, "frozen", False):
+            here = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            here = os.path.dirname(os.path.abspath(__file__))
         alt = os.path.join(here, src)
         if os.path.isdir(alt) or os.path.isfile(alt):
             src = alt
         else:
-            print("找不到频道表来源: %s" % src)
+            msg = ("找不到频道表目录「%s」。\n\n"
+                   "请把 CH 文件夹放在本程序同一目录下：\n%s"
+                   % (src, alt))
+            # -w 打包后没有控制台，print 看不见 → 必须弹框，否则表现为"双击没反应"
+            if getattr(sys, "frozen", False):
+                from tkinter import messagebox as _mb
+                _mb.showerror("启动失败", msg)
+            else:
+                print(msg.replace("\n\n", " "))
             return 2
 
     root = tk.Tk()
