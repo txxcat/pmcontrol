@@ -42,7 +42,7 @@ def check(name, cond, detail=""):
 
 def demo_source():
     """把 4 张 DEMO 表复制进临时目录（TER/ + SAT/），返回根目录"""
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_edit_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_edit_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
@@ -232,7 +232,7 @@ def part1():
 def part2():
     print("\n== Part 2 zip 备份（promax_plan_backup）==")
     src = demo_source()
-    bdir = tempfile.mkdtemp(prefix="pmcontorl_bak_")
+    bdir = tempfile.mkdtemp(prefix="pmcontrol_bak_")
 
     total = len(E.list_plans(src))
     z = B.backup_plans(src, app_dir=bdir, tag="manual", reason="测试")
@@ -283,7 +283,7 @@ def part2():
           res["backup"])
 
     # ---- 路径穿越防护 ----
-    evil = os.path.join(tempfile.mkdtemp(prefix="pmcontorl_evil_"), "evil.zip")
+    evil = os.path.join(tempfile.mkdtemp(prefix="pmcontrol_evil_"), "evil.zip")
     with zipfile.ZipFile(evil, "w") as zf:
         zf.writestr("CH/TER/../../escape.XML", "<x/>")
         zf.writestr("TER/plain.XML", "<x/>")
@@ -297,7 +297,7 @@ def part2():
           not os.path.isfile(os.path.join(src, "plain.XML")))
 
     # ---- 空目录 ----
-    empty = tempfile.mkdtemp(prefix="pmcontorl_empty_")
+    empty = tempfile.mkdtemp(prefix="pmcontrol_empty_")
     check("空目录备份返回 None",
           B.backup_plans(empty, app_dir=bdir) is None)
     check("坏备份读 manifest 不炸", B.backup_info(evil) != "" or True)
@@ -317,7 +317,7 @@ def part3():
         return
 
     src = demo_source()
-    bdir = tempfile.mkdtemp(prefix="pmcontorl_bak_")
+    bdir = tempfile.mkdtemp(prefix="pmcontrol_bak_")
     B.backup_dir = lambda app_dir=None: os.path.join(bdir, B.BACKUP_DIRNAME)
 
     # ---- 桩：把所有模态对话框换成直接返回 ----
@@ -609,7 +609,7 @@ def part4():
     gui.App._open = staticmethod(lambda p: None)
 
     src = demo_source()
-    bdir = tempfile.mkdtemp(prefix="pmcontorl_bak_")
+    bdir = tempfile.mkdtemp(prefix="pmcontrol_bak_")
     real_backup_dir = B.backup_dir
     B.backup_dir = lambda app_dir=None: os.path.join(bdir, B.BACKUP_DIRNAME)
 

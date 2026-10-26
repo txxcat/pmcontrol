@@ -144,7 +144,7 @@ def port_busy(port=2222):
 
 
 def demo_only_dir():
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_px_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_px_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
@@ -172,7 +172,7 @@ def wait_finished(root, app, timeout=120.0):
 
 def main():
     demo_dir = demo_only_dir()
-    outdir = tempfile.mkdtemp(prefix="pmcontorl_pxout_")
+    outdir = tempfile.mkdtemp(prefix="pmcontrol_pxout_")
     root = tk.Tk()
     mock = None
     try:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成 README 用的两张界面截图（**全部用演示数据**，不含真实 IP / 频道表 / 输出目录）。
 
-  docs/pmcontorl_main.png         主界面（已应用演示预设）
+  docs/pmcontrol_main.png         主界面（已应用演示预设）
   docs/screenshot-settings.png    设置界面
 
 🔴 四道防线，缺一不可：
@@ -67,7 +67,7 @@ def demo_only_dir():
 
     这样界面里只会出现演示表，不会把本地真实频道表名截进图里。
     """
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_shot_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_shot_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
@@ -235,7 +235,7 @@ def main(which=("main", "settings", "progress")):
             app.out_var.set(r"D:\Demo\Downloads\射频数字_DEMO_20261015.xlsx")
             settle(root, 40)
             assert_no_local_user(root)          # 防线 4
-            grab(root, os.path.join("docs", "pmcontorl_main.png"), root)
+            grab(root, os.path.join("docs", "pmcontrol_main.png"), root)
 
         # ---- 2) 设置界面 ----
         if "settings" in which:

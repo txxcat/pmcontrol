@@ -71,7 +71,7 @@ def demo_only_dir():
     ⚠️ 直接扫 CH/ 会把本地**真实频道表名**列进界面；虽然只是测试脚本，
     但一旦有人在带真实表的机器上跑并截图就等于泄露。隔离目录是最省事的防线。
     """
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_hl_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_hl_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)

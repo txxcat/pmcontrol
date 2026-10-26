@@ -71,7 +71,7 @@ def check(name, cond, detail=""):
 
 def demo_only_dir():
     """只扫「复制了 DEMO-* 表」的隔离目录"""
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_layout_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_layout_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
