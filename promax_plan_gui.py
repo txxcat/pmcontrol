@@ -34,6 +34,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -1040,6 +1041,10 @@ class App(object):
         self.thread = None
         self.rows = {}             # 表名 -> [row]
         self.out_path = None
+        # 输出文件名是不是"按选择自动生成"的（预设名/用户手选 = False）。
+        # 🔴 _auto_name 只能改自动生成的名字，绝不冲掉预设名和用户手输的名字
+        #    （踩过：应用预设后被 _sync_sel 冲成 SAT_20261026，2026-10-26）
+        self._name_auto = False
         # 「已选频道表」列表的进度态：key 列表（按 Listbox 行序）+ 已完成集合
         #   + 当前正在测的那张。三者一起决定每行的底色/前缀，见 _paint_sel()。
         self.sel_box_keys = []     # Listbox 第 i 行 → 频道表 key
@@ -1462,10 +1467,21 @@ class App(object):
             self.sel_box.see(self.sel_box_keys.index(self.sel_active))
 
     def _auto_name(self, keys):
-        """手动勾选时的默认文件名：单选用表名，多选用 SAT/TER+日期"""
+        """按当前选择生成默认文件名：单选 → 表名_日期，多选 → SAT/TER/MIX_日期。
+
+        🔴 只在两种情况下生效：① 还没有文件名；② 当前文件名本身就是
+        上一条自动生成的（_name_auto=True）。**预设名、用户手输/手选的
+        名字一律不冲。**
+        （踩过：设置窗保存后 _sync_sel → _auto_name 会把预设名冲成
+          SAT_20261026，用户看到"文件名不按分组来"；手动点一行表格
+          切换勾选同样会冲。）
+        """
         if not keys:
-            self.out_var.set("")
+            if self._name_auto or not self.out_var.get():
+                self.out_var.set("")
             return
+        if self.out_var.get() and not self._name_auto:
+            return                      # 已有明确名字（预设/手输），不动
         sel = [self._by_key(k) for k in keys]
         sel = [i for i in sel if i]
         d = date8()
@@ -1476,7 +1492,9 @@ class App(object):
             band = "SAT" if "SAT" in bands and "TER" not in bands else (
                 "TER" if bands == {"TER"} else "MIX")
             name = "%s_%s" % (band, d)
-        self.out_var.set(os.path.join(self.outdir_var.get(), name + fmt_suffix(self.cfg)))
+        self.out_var.set(os.path.join(self.outdir_var.get(),
+                                      name + fmt_suffix(self.cfg)))
+        self._name_auto = True
 
     # ---------------- 预设按钮（配置驱动） ----------------
     def _build_presets(self):
@@ -1532,6 +1550,7 @@ class App(object):
         name = preset_filename(preset)
         self.out_var.set(os.path.join(self.outdir_var.get(),
                                       name + fmt_suffix(self.cfg)))
+        self._name_auto = False          # 预设名是明确命名，不许被 _auto_name 冲
         # 记住当前预设，start() 要靠它决定表间是否暂停
         self.active_preset = preset
         pz = "暂停" if preset_pause(preset, self.cfg) else "不暂停"
@@ -1575,6 +1594,7 @@ class App(object):
                        ("所有文件", "*.*")])
         if p:
             self.out_var.set(p)
+            self._name_auto = False      # 用户手选的文件名
             d = os.path.dirname(p)
             if d:
                 self.outdir_var.set(d)
@@ -2461,6 +2481,7 @@ class App(object):
             if not newp:
                 return None
             self.out_var.set(newp)
+            self._name_auto = False      # 用户手改的名字
             d = os.path.dirname(newp)
             if d:
                 self._remember_outdir(d)
@@ -2523,6 +2544,7 @@ class App(object):
                         return False, None
                     path = newp
                     self.out_var.set(path)
+                    self._name_auto = False      # 用户另存为选的名字
                     continue
                 return False, None
             except Exception as e:
@@ -2837,11 +2859,23 @@ class App(object):
 
     @staticmethod
     def _open(path):
+        """用系统默认程序打开文件（跨平台）。
+
+        Windows → os.startfile；macOS → open；Linux → xdg-open。
+        🔴 别用 AttributeError 探路（旧写法）：macOS 上没有 os.startfile，
+        会掉进 Linux 分支去跑 xdg-open —— macOS 也没这个命令，
+        FileNotFoundError 直接冒到 tk 回调里，表现就是"点了打开文件
+        没反应/报错"。（macOS 实测踩过，2026-10-26）
+        """
         try:
-            os.startfile(path)      # Windows
-        except AttributeError:
-            import subprocess
-            subprocess.Popen(["xdg-open", path])
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            elif os.name == "nt":
+                os.startfile(path)          # Windows
+            else:
+                subprocess.Popen(["xdg-open", path])   # Linux
+        except Exception as e:
+            messagebox.showerror("打不开", "无法打开文件：\n%s\n\n%s" % (path, e))
 
 
 def main():
