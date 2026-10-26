@@ -140,6 +140,10 @@ macOS 用 `python3 promax_plan_gui.py`（系统 Python 自带 tkinter；用 Home
 Python 要额外 `brew install python-tk`）。打开结果文件按平台自动选
 `startfile` / `open` / `xdg-open`。
 
+界面按**当前字体**自适应：右侧「输出文件 / 已选频道表」那一列的宽度不是写死的像素，
+而是由控件按当前系统字体算出来的自然宽度（macOS 13pt 比 Windows 9pt 宽约 1/3），
+所以换平台、改系统字号都不会出现"内容被裁 / 那一列被挤成一条"。
+
 ### 自己打包成 exe（PyInstaller）
 
 ```bash
@@ -187,6 +191,7 @@ python _test_timer.py             # 顶栏计时器：暂停停表 / 断线挂�
 python _test_retest.py            # 重测失败频道：只补测未成功的几条并合并回原文件
 python _test_promax.py            # Promax 格式导出 / 转换（结构、编码、口径、GUI 两个入口）
 python _test_platform.py          # 跨平台打开文件（win/mac/linux）+ 文件名归属不被冲
+python _test_layout.py            # 右列宽度：随字体自适应 / 不裁剪 / 窄窗不被挤扁
 ```
 
 ## 关于频道表数据
@@ -227,6 +232,7 @@ CH/
 | `_test_retest.py` | 「重测失败频道」测试（覆盖不重复 / 只跑待办频道 / 结果文件合并） |
 | `_test_promax.py` | Promax 格式导出测试（XML 结构 / 编码 / 数值口径 / xlsx·csv 转换） |
 | `_test_platform.py` | 跨平台测试（打开文件三分支 + 预设文件名不被自动命名冲掉） |
+| `_test_layout.py` | 右列布局测试（宽度随字体自适应 / 内容不被裁 / 窄窗不被挤扁 / pack 顺序） |
 | `_shot_settings.py` | 生成 README 用的三张界面截图（用演示配置，不碰真实数据） |
 | `CH/TER`, `CH/SAT` | 频道表目录（仅 DEMO-\* 入库） |
 

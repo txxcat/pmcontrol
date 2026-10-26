@@ -91,6 +91,13 @@ gui.messagebox.showinfo = DLG.showinfo
 gui.messagebox.showwarning = DLG.showwarning
 gui.messagebox.showerror = DLG.showerror
 
+# 🔴 别真的用系统程序打开结果文件：askyesno 桩恒回答"是"，走完一轮就会调
+#    os.startfile 拉起 Excel / WPS，那个 xlsx 被占住 → 后面「重测→覆盖保存」
+#    全是 PermissionError → 弹出「文件被占用」模态框 → 测试永远卡住
+#    （2026-10-26 踩过：看着像布局改动把测试搞挂了，其实是 WPS 锁了临时文件）。
+OPENED = []
+gui.App._open = staticmethod(lambda p: OPENED.append(p))
+
 
 def demo_only_dir():
     """只扫「复制了 DEMO-* 表」的隔离目录（详见 _test_highlight.py 的说明）。"""
