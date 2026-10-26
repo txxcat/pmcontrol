@@ -1039,6 +1039,8 @@ class App(object):
         self.sep_log_path = None   # 独立日志文件路径
         self.engine = None
         self.thread = None
+        self._editor = None        # 频道表管理窗口（单例，见 open_plan_editor）
+        self._sync_afters = set()  # 同步日志排队中的 after id（关窗要取消）
         self.rows = {}             # 表名 -> [row]
         self.out_path = None
         # 输出文件名是不是"按选择自动生成"的（预设名/用户手选 = False）。
@@ -1121,6 +1123,10 @@ class App(object):
         self.retest_btn.pack(side="left", padx=(4, 0))
         ttk.Button(top, text="设置", command=self._open_settings
                    ).pack(side="left", padx=6)
+        # 频道表管理：新建/删除/编辑频道表与频点 + zip 备份 + 与仪器同步
+        # （编辑器里改完会回调 _rescan_after_edit 重扫本窗口的列表）
+        ttk.Button(top, text="频道表管理", command=self.open_plan_editor
+                   ).pack(side="left")
         self.status = tk.StringVar(value="就绪")
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=10)
         # ---- 计时器（顶栏最右，紧接「设置」之后）----
@@ -1410,6 +1416,74 @@ class App(object):
                              values=("☐", it.label, it.band,
                                      len(it.channels), kind))
         self._sync_sel()
+
+    # ---------------- 频道表管理（编辑 / 备份 / 与设备同步） ----------------
+    def open_plan_editor(self):
+        """打开频道表管理窗口（单例：已经在开就把它提到前面）"""
+        try:
+            import promax_plan_editor_gui as EG
+        except Exception as e:                 # 缺模块/语法错都别让主窗口崩
+            return messagebox.showerror("打不开",
+                                        "频道表管理器加载失败：%s" % e)
+        if self._editor is not None:
+            try:
+                if self._editor.winfo_exists():
+                    self._editor.deiconify()
+                    self._editor.lift()
+                    self._editor.focus_set()
+                    return
+            except Exception:
+                pass
+        self._editor = EG.PlanEditorWindow(
+            self.root, self.source,
+            sync_factory=self._make_sync,
+            on_change=self._rescan_after_edit)
+
+    def _make_sync(self):
+        """给编辑器造一个同步会话（用当前顶栏的 IP / 端口）"""
+        from promax_plan_sync import PlanSync, SyncError
+        ip = (self.ip_var.get() or "").strip()
+        if not ip:
+            raise SyncError("顶栏还没填仪器 IP")
+        try:
+            port = int(self.port_var.get())
+        except (TypeError, ValueError):
+            port = 2222
+        return PlanSync(ip, port, source=self.source, log=self._sync_log,
+                        timeout=20.0)
+
+    def _sync_log(self, text):
+        """同步线程的日志转发。
+
+        🔴 `_log` 直接操作 Tk 控件，只能主线程调；这里用 after 排队。
+           after 的 id 要记下来：窗口销毁后挂起的回调再触发，Tk 会抛
+           `invalid command name ...` 红字（不致命，但日志里很难看）。
+        """
+        box = []
+
+        def run():
+            if box and box[0] in self._sync_afters:
+                self._sync_afters.discard(box[0])
+            try:
+                self._log("   [同步] %s" % text)
+            except Exception:
+                pass
+
+        try:
+            box.append(self.root.after(0, run))
+            self._sync_afters.add(box[0])
+        except Exception:
+            pass
+
+    def _rescan_after_edit(self):
+        """编辑器改过表之后重扫列表，尽量保住原来的勾选"""
+        keep = set(k for k, v in self.check_vars.items() if v.get())
+        self._scan(self.source)
+        for k in keep & set(self.check_vars):
+            self.check_vars[k].set(1)
+            self.tree.set(k, "check", "☑")
+        if keep:
+            self._sync_sel()
 
     def _on_click(self, ev):
         """点表格行切换勾选"""
@@ -2205,6 +2279,15 @@ class App(object):
         socket 一起丢弃，socket 只发 FIN（不是 RST）→ 仪器可能卡在
         FIN_WAIT_2 不释放会话 → 下一次连接就"连得上但完全收不到回复"。
         """
+        # 先收编辑窗口：它可能有未保存的改动，要给它机会问一句、保存
+        if self._editor is not None:
+            try:
+                if self._editor.winfo_exists():
+                    self._editor._on_close()
+                    if self._editor.winfo_exists():
+                        return          # 用户在编辑器里选了"取消"→ 主窗口也别关
+            except Exception:
+                pass
         t = getattr(self, "thread", None)
         if self.engine:
             try:
@@ -2222,6 +2305,12 @@ class App(object):
             self._close_log_file()
         except Exception:
             pass
+        for aid in list(self._sync_afters):     # 挂起的同步日志回调，别再让它响
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+        self._sync_afters.clear()
         try:
             self.root.destroy()
         except Exception:

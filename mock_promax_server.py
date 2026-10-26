@@ -550,11 +550,342 @@ def dispatch(body, query):
         # 真机实测：必须不带参数；带 TER-CH/SAT-CH 的写法 NAK
         if re.search(r"(TER|SAT)-CH", body, re.I):
             return REJECT
+        # 文件传输模式下"设备上的文件"才是真相（上传/删除会改变数量），
+        # 没开文件传输时按频道表解析结果报
+        n_ter = len(IO_FILES["TER"]) if IO_ENABLED else len(PLANS["TER"])
+        n_sat = len(IO_FILES["SAT"]) if IO_ENABLED else len(PLANS["SAT"])
         return ("*INSTALLATION NAME=DEFAULT TER-CH=%d SAT-CH=%d DISEQC_PROGRAM=0\n"
                 "PNG=723 DATALOGGER=18 SP=0 ECHOES=0 CONSTELLATION=0 MER=0 LNB=0"
-                % (len(PLANS["TER"]), len(PLANS["SAT"])))
+                % (n_ter, n_sat))
 
     return REJECT
+
+
+# ================================================================
+# 频道表文件传输（INSTALLATION 命令族）—— 手册 v2.2 第 12~14 页
+# ================================================================
+# 真机 31.17 只实测过 `*?INSTALLATION` / `*?INSTALLATION CURRENT`（且后者带
+# TER-CH= 会 NAK）。文件传输这几条**尚未在真机验证**，这里按手册尽力复现，
+# 好让客户端的分块/CRC/重试逻辑在无真机时也能跑通、跑错。
+#
+# 用法：python mock_promax_server.py --io            （默认开启，不影响测量命令）
+#       --io-crc sum       换一种 CRC 算法（考客户端能不能反推出来）
+#       --io-esc           把数据里的 0xFF 按 telnet 转义成 0xFF 0xFF（考解转义）
+#       --io-no-tag        `*?INSTALLATION CURRENT TER-CH=1` 一律 NAK（复现 31.17）
+IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{表名: bytes}
+IO_CFG = {"crc": "crc8-0x07", "esc": False, "no_tag": False,
+          "block": 1024, "dir": None}
+IO_RECV = {"on": False}
+IO_ENABLED = True
+
+
+def _crc8_07(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def _crc8_31(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x8C if crc & 1 else crc >> 1
+    return crc
+
+
+IO_CRC = {
+    "crc8-0x07": _crc8_07,
+    "crc8-0x31": _crc8_31,
+    "xor": lambda d: __import__("functools").reduce(lambda a, b: a ^ b, d, 0)
+    if d else 0,
+    "sum": lambda d: sum(d) & 0xFF,
+    "sum-neg": lambda d: (-sum(d)) & 0xFF,
+}
+
+
+def io_crc(data):
+    fn = IO_CRC.get(IO_CFG["crc"]) or _crc8_07
+    return fn(data)
+
+
+def load_io_files(root, only_names=None):
+    """把频道表文件的**原始字节**读进内存，作为"设备上的文件"
+
+    only_names：只装入这些表名（与 `--plan` 过滤保持一致，否则
+    `*?INSTALLATION CURRENT` 报的数量会和按序号取到的名字对不上）。
+    """
+    import glob as _glob
+    if not root or not os.path.isdir(root):
+        return
+    pairs = []
+    for kind, sub in (("TER", "TER"), ("SAT", "SAT")):
+        d = os.path.join(root, sub)
+        if os.path.isdir(d):
+            pairs += [(kind, p) for p in sorted(_glob.glob(os.path.join(d, "*.XML")))
+                      + sorted(_glob.glob(os.path.join(d, "*.xml")))]
+    if not pairs:                      # 表都放在 root 里
+        for p in sorted(_glob.glob(os.path.join(root, "*.XML"))):
+            try:
+                with open(p, "rb") as f:
+                    head = f.read(400).decode("utf-8", "replace")
+            except OSError:
+                continue
+            pairs.append(("SAT" if "SATELLITE" in head.upper() else "TER", p))
+    for kind, p in pairs:
+        name = os.path.splitext(os.path.basename(p))[0].strip()
+        if only_names is not None and name not in only_names:
+            continue
+        try:
+            with open(p, "rb") as f:
+                IO_FILES[kind][name] = f.read()
+        except OSError:
+            continue
+    log("[IO] 设备侧可传输的表：TER %d 张 / SAT %d 张（CRC=%s%s）"
+        % (len(IO_FILES["TER"]), len(IO_FILES["SAT"]), IO_CFG["crc"],
+           "，IAC 转义" if IO_CFG["esc"] else ""))
+
+
+def _io_send(conn, data):
+    """发原始字节；`--io-esc` 时把 0xFF 转义成 0xFF 0xFF（模拟 telnet）"""
+    if IO_CFG["esc"]:
+        data = data.replace(b"\xff", b"\xff\xff")
+    conn.sendall(data)
+
+
+def _io_send_blocks(conn, data, block):
+    """逐块下发：XOFF + <数据> + <CRC 1 字节> + XON，每块等一个 ACK
+
+    （手册时序：RANGER→Xoff，RANGER→block1 + crc + Xon，PC→ACK，…）
+    """
+    total = len(data)
+    sent = 0
+    while sent < total:
+        chunk = data[sent:sent + block]
+        conn.sendall(bytes([XOFF]))
+        time.sleep(0.01)
+        _io_send(conn, chunk + bytes([io_crc(chunk)]))
+        conn.sendall(bytes([XON]))
+        if _io_recv_ctrl(conn, timeout=20.0) != ACK:
+            log("  !! 客户端没给 ACK，中止下发（已发 %d/%d）" % (sent, total))
+            return False
+        sent += len(chunk)
+    log("  [IO] 下发完成 %d 字节（%d 块）" % (total, (total + block - 1) // block))
+    return True
+
+
+def _io_recv_ctrl(conn, timeout=10.0):
+    """阻塞读一个控制字节（跳过心跳/无关字节）"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            conn.settimeout(max(0.05, timeout - (time.time() - t0)))
+            b = conn.recv(1)
+        except (OSError, socket.timeout):
+            return None
+        if not b:
+            return None
+        c = b[0]
+        if c in (ACK, NAK):
+            return c
+        if c in (XON, XOFF, CR, LF):
+            continue
+        return c
+    return None
+
+
+def _io_recv_exact(conn, n, timeout=20.0):
+    """读满 n 字节（原始，不解 IAC —— 上传时客户端发的是纯数据）"""
+    out = bytearray()
+    t0 = time.time()
+    while len(out) < n:
+        left = timeout - (time.time() - t0)
+        if left <= 0:
+            return bytes(out)
+        try:
+            conn.settimeout(left)
+            b = conn.recv(min(4096, n - len(out)))
+        except (OSError, socket.timeout):
+            return bytes(out)
+        if not b:
+            return bytes(out)
+        out.extend(b)
+    return bytes(out)
+
+
+def fileio_respond(conn, query, body):
+    """处理 INSTALLATION 文件命令。处理了就返回 True（自己负责 XOFF/ACK 时序）。
+
+    支持（对应手册）：
+      *?INSTALLATION CURRENT TER-CH=<名> BLOCK=<n>   下载单表
+      *?INSTALLATION CURRENT ZIP BLOCK=<n>           整装下载
+      *?INSTALLATION CURRENT TER-CH=<序号>           取第 n 张表名（--io-no-tag 时 NAK）
+      *INSTALLATION PC FILE TAG=.. NAME=.. SIZE=.. BLOCK=..   上传单表
+      *INSTALLATION CURRENT REMOVE TER-CH=<名>       删除
+    """
+    import re as _re
+    k = " ".join(body.upper().split())
+    m_tag = _re.search(r"\b(TER|SAT)-CH\s*=\s*([^\s]+)", body, _re.I)
+
+    # ---------- 取表名（按序号） ----------
+    if query and k.startswith("INSTALLATION CURRENT") and m_tag \
+            and "BLOCK" not in k:
+        if IO_CFG["no_tag"]:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] 拒绝按序号取名（--io-no-tag，复现 31.17）")
+            return True
+        kind = m_tag.group(1).upper()
+        try:
+            idx = int(m_tag.group(2))
+        except ValueError:
+            idx = 0
+        names = sorted(IO_FILES[kind])
+        if not (1 <= idx <= len(names)):
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            return True
+        out = "*INSTALLATION %s-CH=%s" % (kind, names[idx - 1])
+        conn.sendall(bytes([XOFF, ACK]))
+        time.sleep(0.05)
+        conn.sendall(out.encode("ascii", "replace") + bytes([CR, LF]) + bytes([XON]))
+        log("  [IO] TX %r" % out)
+        return True
+
+    # ---------- 下载单表 ----------
+    if query and k.startswith("INSTALLATION CURRENT") and m_tag and "BLOCK" in k:
+        if IO_CFG["no_tag"]:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] 拒绝下载（--io-no-tag，复现 31.17）")
+            return True
+        kind = m_tag.group(1).upper()
+        name = m_tag.group(2).strip()
+        data = IO_FILES[kind].get(name)
+        if data is None:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] NAK：没有 %s %s" % (kind, name))
+            return True
+        block = _io_block(body)
+        conn.sendall(bytes([XOFF, ACK]))
+        time.sleep(0.05)
+        conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode() + bytes([CR, LF]))
+        conn.sendall(bytes([XON]))
+        if _io_recv_ctrl(conn, timeout=10.0) != ACK:
+            log("  !! 客户端没 ACK SIZE，中止")
+            return True
+        _io_send_blocks(conn, data, block)
+        return True
+
+    # ---------- 整装下载 ----------
+    if query and k.startswith("INSTALLATION CURRENT ZIP"):
+        import io as _io
+        import zipfile as _zip
+        buf = _io.BytesIO()
+        with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as z:
+            for kind, sub in (("TER", "TER"), ("SAT", "SAT")):
+                for name, data in sorted(IO_FILES[kind].items()):
+                    z.writestr("CH/%s/%s.XML" % (sub, name), data)
+        data = buf.getvalue()
+        block = _io_block(body)
+        conn.sendall(bytes([XOFF, ACK]))
+        time.sleep(0.05)
+        conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode()
+                     + bytes([CR, LF]) + bytes([XON]))
+        if _io_recv_ctrl(conn, timeout=10.0) != ACK:
+            log("  !! 客户端没 ACK SIZE，中止整装")
+            return True
+        _io_send_blocks(conn, data, block)
+        return True
+
+    # ---------- 上传单表 ----------
+    if (not query) and k.startswith("INSTALLATION PC FILE"):
+        kv = {}
+        for item in body.split():
+            if "=" in item:
+                a, b = item.split("=", 1)
+                kv[a.upper()] = b
+        kind = (kv.get("TAG", "TER-CH").upper().split("-")[0])
+        if kind not in ("TER", "SAT"):
+            kind = "TER"
+        try:
+            size = int(kv.get("SIZE", "0"))
+        except ValueError:
+            size = 0
+        block = int(kv.get("BLOCK", IO_CFG["block"]) or IO_CFG["block"])
+        name = kv.get("NAME", "").strip()
+        if not name or size <= 0 or size > 8 * 1024 * 1024:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] NAK 上传参数不合法")
+            return True
+        conn.sendall(bytes([XOFF, ACK]))
+        log("  [IO] 准备接收 %s/%s（%d 字节，块 %d）" % (kind, name, size, block))
+        IO_RECV.update({"on": True, "size": size, "block": block, "kind": kind,
+                        "name": name, "buf": bytearray(), "data": bytearray()})
+        return True
+
+    # ---------- 删除 ----------
+    if (not query) and k.startswith("INSTALLATION CURRENT REMOVE"):
+        kind = m_tag.group(1).upper() if m_tag else "TER"
+        name = m_tag.group(2).strip() if m_tag else ""
+        if name and name in IO_FILES[kind]:
+            del IO_FILES[kind][name]
+            conn.sendall(bytes([XOFF, ACK, XON]))
+            log("  [IO] 已删除 %s/%s" % (kind, name))
+        else:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] NAK：要删的 %s/%s 不存在" % (kind, name))
+        return True
+    return False
+
+
+def _io_block(body):
+    import re as _re
+    m = _re.search(r"BLOCK\s*=\s*(\d+)", body, _re.I)
+    try:
+        return max(64, int(m.group(1))) if m else IO_CFG["block"]
+    except ValueError:
+        return IO_CFG["block"]
+
+
+def io_feed(conn, chunk):
+    """接收上传的数据块（由 handle() 的读循环直接喂进来，绕过行解析）"""
+    st = IO_RECV
+    st["buf"].extend(chunk)
+    while st["on"]:
+        remain = st["size"] - len(st["data"])
+        want = min(st["block"], remain)
+        if len(st["buf"]) < want + 1:
+            return
+        data = bytes(st["buf"][:want])
+        crc = st["buf"][want]
+        del st["buf"][:want + 1]
+        if io_crc(data) != crc:
+            log("  !! 上传块 CRC 错（算 0x%02X 收到 0x%02X），NAK"
+                % (io_crc(data), crc))
+            conn.sendall(bytes([NAK, XON]))
+            st["on"] = False
+            return
+        st["data"].extend(data)
+        conn.sendall(bytes([ACK]))
+        if len(st["data"]) >= st["size"]:
+            IO_FILES[st["kind"]][st["name"]] = bytes(st["data"])
+            log("  [IO] 收到 %s/%s（%d 字节）"
+                % (st["kind"], st["name"], len(st["data"])))
+            if IO_CFG["dir"]:
+                try:
+                    os.makedirs(IO_CFG["dir"], exist_ok=True)
+                    p = os.path.join(IO_CFG["dir"], "%s_%s.XML"
+                                     % (st["kind"], st["name"]))
+                    with open(p, "wb") as f:
+                        f.write(st["data"])
+                except OSError:
+                    pass
+            st["on"] = False
+            conn.sendall(bytes([XON]))
+            return
+        # 半包：继续等（最后一个字节可能是下一块的开始）
+        return
 
 
 def _valid_sat_if(khz):
@@ -678,6 +1009,13 @@ def handle(conn, addr):
             if not chunk:
                 break
             log("  <<RAW %r" % chunk)
+            # 上传进行中：整块喂给文件接收器，**不能**按行解析（二进制）
+            if IO_RECV["on"]:
+                try:
+                    io_feed(conn, chunk)
+                except OSError:
+                    return
+                continue
             for b in chunk:
                 if iac == 1:
                     iac_verb = b
@@ -699,6 +1037,10 @@ def handle(conn, addr):
                     continue
                 if b == IAC:
                     iac = 1
+                    continue
+                # 流控/应答字节：客户端在块传输里会回 ACK，不能让它们粘在下一条
+                # 命令前面（否则 line 不以 '*' 开头，命令被当成噪声丢掉）
+                if b in (ACK, NAK, XON, XOFF):
                     continue
                 buf.append(b)
             while CR in buf:
@@ -743,6 +1085,16 @@ def respond(conn, line):
 
     if SLOW:
         time.sleep(SLOW)
+
+    # 频道表文件传输（INSTALLATION 命令族）自己管时序，命中就返回
+    if IO_ENABLED:
+        try:
+            if fileio_respond(conn, query, body):
+                return
+        except OSError:
+            return
+        except Exception as e:
+            log("  !! fileio 异常: %r" % e)
 
     with LOCK:
         try:
@@ -806,6 +1158,18 @@ def main():
                     help="只允许一个会话（复现真机单会话限制）")
     ap.add_argument("--drop-on-band", type=int, default=0, metavar="N",
                     help="收到第 N 条 *TUNE BAND= 时直接断链（模拟表级准备阶段掉线）")
+    ap.add_argument("--no-io", action="store_true",
+                    help="关掉频道表文件传输模拟（INSTALLATION 命令族一律走原逻辑）")
+    ap.add_argument("--io-crc", default="crc8-0x07",
+                    choices=sorted(IO_CRC),
+                    help="分块传输用的 CRC 算法（默认 crc8-0x07；换成别的可考客户端能不能反推）")
+    ap.add_argument("--io-esc", action="store_true",
+                    help="把数据里的 0xFF 按 telnet 转义成 0xFF 0xFF（考客户端解转义）")
+    ap.add_argument("--io-no-tag", action="store_true",
+                    help="`*?INSTALLATION CURRENT TER-CH=...` 一律 NAK（复现 31.17 实测行为）")
+    ap.add_argument("--io-block", type=int, default=1024, help="默认块大小")
+    ap.add_argument("--io-dir", default=None,
+                    help="收到的上传表另存一份到该目录（核对用）")
     a = ap.parse_args()
 
     QUIET = a.quiet
@@ -813,6 +1177,9 @@ def main():
     SINGLE = a.single
     STATE.fail_first = a.fail_first
     globals()["DROP_ON_BAND"] = a.drop_on_band
+    globals()["IO_ENABLED"] = not a.no_io
+    IO_CFG.update({"crc": a.io_crc, "esc": a.io_esc, "no_tag": a.io_no_tag,
+                   "block": a.io_block, "dir": a.io_dir})
     # 锁定时间：分频段可调；--lock-time 作全局覆盖（旧参数兼容）
     if a.lock_time is not None:
         LOCK_TIME["TER"] = LOCK_TIME["SAT"] = a.lock_time
@@ -823,6 +1190,10 @@ def main():
 
     load_plan_dir(a.plans or default_plans_dir(), a.plan)
     POINTS = all_points()
+    if IO_ENABLED:
+        load_io_files(a.plans or default_plans_dir(),
+                      {os.path.splitext(p["file"])[0].strip()
+                       for tag in ("TER", "SAT") for p in PLANS[tag]})
 
     n_ter = sum(len(p["channels"]) for p in PLANS["TER"])
     n_sat = sum(len(p["channels"]) for p in PLANS["SAT"])
