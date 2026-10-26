@@ -66,7 +66,7 @@ gui.load_config = lambda *a, **k: dict(DEMO)
 
 def demo_only_dir():
     """只扫「复制了 DEMO-* 表」的隔离目录（详见 _test_highlight.py 的说明）。"""
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_tm_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_tm_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)

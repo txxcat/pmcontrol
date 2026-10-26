@@ -99,7 +99,7 @@ gui.messagebox.showerror = DLG.showerror
 
 def demo_only_dir():
     """只扫「复制了 DEMO-* 表」的隔离目录（同 _test_retest.py 的做法）"""
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_plat_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_plat_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
@@ -193,7 +193,7 @@ def test_name_owner():
     print("\n--- B) 输出文件名归属（预设名不被冲成 SAT_xxx）")
 
     demo_dir = demo_only_dir()
-    outdir = tempfile.mkdtemp(prefix="pmcontorl_nameout_")
+    outdir = tempfile.mkdtemp(prefix="pmcontrol_nameout_")
     root = tk.Tk()
     try:
         app = gui.App(root, demo_dir)

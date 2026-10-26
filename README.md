@@ -1,4 +1,4 @@
-# pmcontorl — PROMAX RANGERNeo 4 频道表批量测试工具
+# pmcontrol — PROMAX RANGERNeo 4 频道表批量测试工具
 
 通过 **Telnet** 远程控制 PROMAX 场强仪，对仪器里的**频道表（Channel Plan）**做批量测量，
 把结果导出成 Excel / CSV，用于有线电视网络与卫星链路的定期巡检。
@@ -8,7 +8,7 @@
 
 ## 下载（Windows 免安装）
 
-不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontorl/releases/latest)**
+不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
 → `pmcontrol-v1.0.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
@@ -19,7 +19,7 @@
 
 **主界面**
 
-![主界面](docs/pmcontorl_main.png)
+![主界面](docs/pmcontrol_main.png)
 
 **设置界面**
 
@@ -149,8 +149,8 @@ XML 手工改，改完还不知道仪器认不认。
 
 ```bash
 # 1. 克隆
-git clone https://github.com/txxcat/pmcontorl.git
-cd pmcontorl
+git clone https://github.com/txxcat/pmcontrol.git
+cd pmcontrol
 
 # 2. （可选）装 openpyxl，不装则结果存为 CSV
 pip install openpyxl

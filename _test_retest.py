@@ -101,7 +101,7 @@ gui.App._open = staticmethod(lambda p: OPENED.append(p))
 
 def demo_only_dir():
     """只扫「复制了 DEMO-* 表」的隔离目录（详见 _test_highlight.py 的说明）。"""
-    tmp = tempfile.mkdtemp(prefix="pmcontorl_rt_")
+    tmp = tempfile.mkdtemp(prefix="pmcontrol_rt_")
     for band in ("TER", "SAT"):
         src = os.path.join(HERE, "CH", band)
         dst = os.path.join(tmp, band)
@@ -187,7 +187,7 @@ def only_select(app, item):
 
 def main():
     demo_dir = demo_only_dir()
-    outdir = tempfile.mkdtemp(prefix="pmcontorl_rtout_")
+    outdir = tempfile.mkdtemp(prefix="pmcontrol_rtout_")
     root = tk.Tk()
     mocks = []
     try:
