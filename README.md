@@ -9,10 +9,12 @@
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
-→ `pmcontrol-v1.0.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
+→ `pmcontrol-v1.1.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
-- 🔴 不要把 exe 单独拖出来运行，它依赖同目录的 `_internal`
+- 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
+  必须和 exe 放在同一目录，缺了启动会弹框提示（不会静默退出）
+- 首次打开约 2~3 秒 —— 单文件版要先自解压到临时目录，属正常现象
 - 首次运行弹「Windows 已保护你的电脑」是正常的（未购买代码签名证书）：
   点「更多信息」→「运行 anyway」
 - 仅支持 Windows 10/11 64 位（打包版）；macOS / Linux 请用源码运行，见下方「运行」
@@ -175,15 +177,23 @@ Python 要额外 `brew install python-tk`）。打开结果文件按平台自动
 
 ### 自己打包成 exe（PyInstaller）
 
+项目根目录的 `pm_installer.bat` 就是官方打包命令，双击即可：
+
 ```bash
 pip install pyinstaller
-pyinstaller -D -w -i "PM Ranger Neo4.png" -n pmcontrol promax_plan_gui.py
+pyinstaller -w -F -i "PM Ranger Neo4.png" -n pmcontrol promax_plan_gui.py
 ```
 
-产物在 `dist/pmcontrol/`（约 33 MB）。发布时把**整个文件夹**打成一个 zip，
-并一起放入 `CH/` 演示表与一份使用说明 —— 程序用 `_app_dir()` 定位配置与频道表，
-解压后换任意目录都能跑。注意：`config.json` 含真实 IP 与预设，**不要**打进包，
-首次运行会自动生成默认配置。
+`-F` 是**单文件**模式，产物只有 `dist/pmcontrol.exe`（约 23 MB），运行时自动解压到
+临时目录、退出后清理；首启因此比文件夹模式慢 2~3 秒。想换成文件夹模式（启动快、
+体积大、但必须整包分发）把 `-F` 换成 `-D`，产物在 `dist/pmcontrol/`（约 33 MB）。
+
+发布时把 exe、`CH/` 演示表、一份使用说明一起打成一个 zip —— 程序用 `_app_dir()`
+定位配置与频道表（frozen 时锚定 exe 所在目录，不是 CWD），解压后换任意目录都能跑。
+注意：`config.json` 含真实 IP 与预设，**不要**打进包，首次运行会自动生成默认配置。
+
+⚠️ 别加 `--clean`：PyInstaller 会批删构建缓存（几百个文件），在带批量删除保护的
+环境里会直接被杀掉。不加也一样，缓存按文件 hash 失效，不影响正确性。
 
 ### 没有仪器？用模拟器
 
