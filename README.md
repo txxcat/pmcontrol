@@ -15,7 +15,7 @@
 - 🔴 不要把 exe 单独拖出来运行，它依赖同目录的 `_internal`
 - 首次运行弹「Windows 已保护你的电脑」是正常的（未购买代码签名证书）：
   点「更多信息」→「运行 anyway」
-- 仅支持 Windows 10/11 64 位
+- 仅支持 Windows 10/11 64 位（打包版）；macOS / Linux 请用源码运行，见下方「运行」
 
 **主界面**
 
@@ -135,6 +135,11 @@ python promax_plan_gui.py
 
 连真实仪器：设置里把「默认 IP」改成仪器的地址（如 `192.168.x.x`），端口默认 `2222`。
 
+**跨平台**：Windows / macOS / Linux 都能跑（tkinter + 标准库，无第三方依赖）。
+macOS 用 `python3 promax_plan_gui.py`（系统 Python 自带 tkinter；用 Homebrew 的
+Python 要额外 `brew install python-tk`）。打开结果文件按平台自动选
+`startfile` / `open` / `xdg-open`。
+
 ### 自己打包成 exe（PyInstaller）
 
 ```bash
@@ -181,6 +186,7 @@ python _test_progress.py          # 频点日志序号 + 两条进度条（含�
 python _test_timer.py             # 顶栏计时器：暂停停表 / 断线挂起不计时（含集成验证）
 python _test_retest.py            # 重测失败频道：只补测未成功的几条并合并回原文件
 python _test_promax.py            # Promax 格式导出 / 转换（结构、编码、口径、GUI 两个入口）
+python _test_platform.py          # 跨平台打开文件（win/mac/linux）+ 文件名归属不被冲
 ```
 
 ## 关于频道表数据
@@ -220,6 +226,7 @@ CH/
 | `_test_timer.py` | 顶栏计时器测试（暂停停表 + 真跑模拟器集成：暂停时长确实被扣掉） |
 | `_test_retest.py` | 「重测失败频道」测试（覆盖不重复 / 只跑待办频道 / 结果文件合并） |
 | `_test_promax.py` | Promax 格式导出测试（XML 结构 / 编码 / 数值口径 / xlsx·csv 转换） |
+| `_test_platform.py` | 跨平台测试（打开文件三分支 + 预设文件名不被自动命名冲掉） |
 | `_shot_settings.py` | 生成 README 用的三张界面截图（用演示配置，不碰真实数据） |
 | `CH/TER`, `CH/SAT` | 频道表目录（仅 DEMO-\* 入库） |
 
