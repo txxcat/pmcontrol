@@ -9,6 +9,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _mock_boot
 from promax_plan_dump import load_plans
 from promax_plan_gui import PlanItem, TestEngine
 
@@ -40,6 +41,9 @@ def main():
     eng.host = host
     eng.quiet = False
     eng.cfg_run = {"log_timing": True, "log_cmd_timing": False}
+
+    # 模拟器没起就自动拉一个（已在跑则不动）
+    _mock_boot.ensure_mock()
 
     # 直接连（复用引擎的 run 逻辑，但只跑指定表）
     from promax_telnet_test import PromaxTelnet, PromaxError

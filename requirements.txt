@@ -1,0 +1,9 @@
+# pmcontrol 运行依赖
+#
+# 说明：唯一的硬依赖是 openpyxl，而且**缺失也不会崩** ——
+# 程序会在导出时自动退化为 CSV，只是没有 xlsx 而已。
+# 所以这份文件主要给「要建可复现环境」的人（CI / 新人）用。
+openpyxl>=3.1
+
+# 仅 _shot_settings.py（生成 README 截图）需要，跑程序本身用不到
+# Pillow>=10

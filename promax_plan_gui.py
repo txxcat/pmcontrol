@@ -2972,11 +2972,17 @@ class App(object):
         会掉进 Linux 分支去跑 xdg-open —— macOS 也没这个命令，
         FileNotFoundError 直接冒到 tk 回调里，表现就是"点了打开文件
         没反应/报错"。（macOS 实测踩过，2026-10-26）
+
+        🔴 三个分支统一看 sys.platform，**不要混用 os.name**：
+        两套判据的后果是每写一个平台用例都得同时 mock 两个全局量，
+        漏一个就会出现"代码没问题、测试在别的平台恒红"（2026-10-30
+        第三方在 macOS 上实测踩到：A2 只改了 sys.platform，
+        os.name 仍是 posix，直接掉进 else 跑了 xdg-open）。
         """
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", path])
-            elif os.name == "nt":
+            elif sys.platform.startswith("win"):
                 os.startfile(path)          # Windows
             else:
                 subprocess.Popen(["xdg-open", path])   # Linux
