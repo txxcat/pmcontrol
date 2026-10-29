@@ -12,8 +12,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _mock_boot
 from promax_telnet_test import (PromaxTelnet, Promax, PromaxError,
-                                parse_measure_all, parse_tune_ch)
+                                PromaxConnLost, parse_measure_all,
+                                parse_tune_ch)
 
 # 模拟器锁定所需的最短连续等待（与启动 mock 的 --lock-time 一致）
 LOCK_TIME = 3.0
@@ -64,8 +66,20 @@ def measure_locked(inst, max_tries=20, wait=WAIT, poll=1.0):
         return "ERR:%s" % e, {}, max_tries
 
 
+# 模拟器没起就自动拉一个（已在跑则不动，保留你自己指定参数的权利）
+_mock_boot.ensure_mock(lock_time=LOCK_TIME)
+
 conn = PromaxTelnet("127.0.0.1", 2222, timeout=8.0, fast=True)
-conn.connect()
+try:
+    conn.connect()
+except PromaxConnLost as e:
+    print("连不上 127.0.0.1:2222：%s" % e, file=sys.stderr)
+    print("请另开终端运行：python mock_promax_server.py --lock-time %s"
+          % LOCK_TIME, file=sys.stderr)
+    sys.exit(2)
+except PromaxError as e:                # 端口通但握手失败等
+    print("与 127.0.0.1:2222 通信失败：%s" % e, file=sys.stderr)
+    sys.exit(2)
 inst = Promax(conn)
 print("=== 基本握手 ===")
 check("VER", "31.17" in " ".join(inst.ver()))

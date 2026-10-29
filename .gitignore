@@ -50,6 +50,10 @@ __pycache__/
 .venv/
 venv/
 
+# ---- 编辑器本地配置（含本机绝对路径，尤其 .vscode/settings.json 的解释器路径）----
+.vscode/
+.idea/
+
 # ---- PyInstaller 构建产物（二进制走 GitHub Release 分发，不进 git 历史）----
 dist/
 build/

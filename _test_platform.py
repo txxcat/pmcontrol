@@ -119,7 +119,6 @@ def test_open():
     real_startfile = getattr(os, "startfile", None)
     real_popen = gui.subprocess.Popen
     real_platform = sys.platform
-    real_name = os.name
 
     opened = {"startfile": [], "popen": []}
 
@@ -153,10 +152,9 @@ def test_open():
               str(opened["startfile"]))
         check("Windows → 不调 Popen", not opened["popen"])
 
-        # A3 Linux：xdg-open（os.name 也要改成 posix，否则在 Windows 上
-        #     测试会走 nt 分支）
+        # A3 Linux：xdg-open
+        #     判据已统一为 sys.platform，不再需要跟着 mock os.name
         sys.platform = "linux"
-        os.name = "posix"
         opened["startfile"], opened["popen"] = [], []
         DLG.calls = []
         gui.App._open(path)
@@ -178,7 +176,6 @@ def test_open():
     finally:
         gui.subprocess.Popen = real_popen
         sys.platform = real_platform
-        os.name = real_name
         if real_startfile is None:
             try:
                 del os.startfile

@@ -147,6 +147,18 @@ XML 手工改，改完还不知道仪器认不认。
 - Python 3.8+（GUI 用 `tkinter`，写 xlsx 需要 `openpyxl`，缺失时自动退化为 CSV）
 - 仪器与主机网络互通，仪器 Telnet 端口 `2222` 开放
 
+实测通过的版本（出问题时先对照这里）：
+
+| 环境 | 结果 |
+|---|---|
+| **Python 3.15.2 + Tcl/Tk 9.0**（macOS 26.7，python.org universal2） | 全部测试套件通过，GUI 正常 |
+| **Python 3.12.10 + Tcl/Tk 8.6**（Windows 11） | 全部测试套件通过，GUI 正常；发布用 exe 由它打包 |
+| Python 3.9.6（macOS 系统自带） | 主要模块 `py_compile` 通过（未跑全量） |
+
+> ⚠️ Python 3.15 起捆绑的是 **Tcl/Tk 9.0**（不再是 8.6），Tk 9 有 breaking change。
+> 本项目的 ttk 用法未受影响，已在 9.0 上实测过；换别的 Tk 版本若遇到怪问题，
+> 先怀疑这里。
+
 ## 快速上手
 
 ```bash
@@ -154,8 +166,8 @@ XML 手工改，改完还不知道仪器认不认。
 git clone https://github.com/txxcat/pmcontrol.git
 cd pmcontrol
 
-# 2. （可选）装 openpyxl，不装则结果存为 CSV
-pip install openpyxl
+# 2. （可选）装依赖，不装则结果存为 CSV
+pip install -r requirements.txt
 
 # 3. 启动
 python promax_plan_gui.py
@@ -217,9 +229,23 @@ python promax_plan_gui.py               # IP 保持 127.0.0.1 即可
 
 ### 跑测试
 
+一条命令跑完所有套件：
+
 ```bash
-python _selftest_mock.py          # 协议级自检（40 项）
-python _e2e_mock.py DEMO-C-Band.XML   # 端到端跑指定频道表
+python run_all_tests.py              # 全跑，末尾汇总「通过 N   失败 N」+ 非 0 退出码
+python run_all_tests.py platform     # 只跑名字含 platform 的套件
+python run_all_tests.py --list       # 看清单
+python run_all_tests.py --fail-fast  # 第一个失败就停
+```
+
+需要连模拟器的套件现在会**自己拉起模拟器**，不用另开终端；如果 `2222` 上已经有人
+在监听，它们不会去动它（保留你自己指定 `--lock-time` 等参数的权利）。
+
+单跑某一项时：
+
+```bash
+python _selftest_mock.py          # 协议级自检（40 项）；加 --lock-time 1.5 可缩短等待
+python _e2e_mock.py DEMO-C-Band.XML   # 端到端跑指定频道表（不带参数则跑全部演示表）
 python _test_reconnect.py         # 断线恢复：跑到一半杀掉模拟器，验证暂停→重连→续跑
 python _test_reconnect.py --manual      # 同上，但关掉自动重连，只走「重试连接」按钮
 python _test_reconnect.py --cold-start  # 开始时模拟器没起（验证首连失败也能挂起重试）
