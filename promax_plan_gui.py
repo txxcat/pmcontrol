@@ -53,6 +53,8 @@ from promax_plan_write import (convert_result_file, default_promax_path,
 from promax_telnet_test import (PromaxTelnet, Promax, PromaxError,
                                 PromaxConnLost, parse_measure_all,
                                 parse_tune_ch)
+import promax_theme as theme
+from promax_widgets import ToggleSwitch
 
 
 def _ts():
@@ -69,9 +71,14 @@ def _fmt_hms(sec):
 
 # --------------------------------------------------------------- 频道表模型
 # 「已选频道表」列表的进度配色：正在测 / 已完成 / 还没测
-SEL_ACTIVE_BG = "#ffd966"       # 琥珀：正在测试的这一张
-SEL_DONE_BG = "#d9f2d9"         # 浅绿：已测完
-SEL_IDLE_BG = "#ffffff"         # 白：排队中
+# 🔴 三色都取自 promax_theme（深色模式整体换一套）。macOS 深色下 Listbox 的
+#    文字是浅色，若底色仍写死白/浅绿 → 白字白底，整列看不见（用户报过）。
+_PAL = theme.palette()
+SEL_ACTIVE_BG = _PAL["active_bg"]    # 琥珀：正在测试的这一张
+SEL_DONE_BG = _PAL["done_bg"]        # 浅绿：已测完
+SEL_IDLE_BG = _PAL["idle_bg"]        # 与列表底同色：排队中
+SEL_FG = _PAL["list_fg"]             # 行文字色（底色一换，字色必须跟着换）
+HINT = _PAL["hint"]                  # 次要说明文字（深色下必须是浅灰）
 
 
 class PlanItem(object):
@@ -1192,7 +1199,7 @@ class App(object):
 
         ttk.Label(right, text="输出文件").pack(anchor="w")
         ttk.Label(right, text="默认目录：系统下载文件夹（注册表读取）",
-                  foreground="#555").pack(anchor="w", pady=(0, 6))
+                  foreground=HINT).pack(anchor="w", pady=(0, 6))
 
         # 目录选择 + 历史下拉
         dirrow = ttk.Frame(right)
@@ -1208,7 +1215,7 @@ class App(object):
         self.out_var = tk.StringVar()
         ttk.Entry(right, textvariable=self.out_var).pack(fill="x", pady=(4, 0))
         ttk.Label(right, text="文件名可用 {date8}/{date6} 占位符",
-                  foreground="#777").pack(anchor="w")
+                  foreground=HINT).pack(anchor="w")
         # 结果 → Promax 仪器格式（给只认仪器导出 XML 的程序用）
         ttk.Button(right, text="转换成Promax格式文件",
                    command=self.convert_promax).pack(anchor="w", pady=(6, 0))
@@ -1220,10 +1227,11 @@ class App(object):
         # Tk Listbox 的选中行会用 selectbackground 盖掉 itemconfig 设的底色，
         # 关掉选中态，"正在测试 / 已完成"的行底色才能稳定显示。
         self.sel_box = tk.Listbox(right, height=10, selectmode="none",
-                                  activestyle="none")
+                                  activestyle="none",
+                                  **theme.listbox_opts())
         self.sel_box.pack(fill="both", expand=True, pady=4)
         ttk.Label(right, text="▶ 正在测试    ✓ 已完成",
-                  foreground="#777").pack(anchor="w")
+                  foreground=HINT).pack(anchor="w")
 
         # ---- 右列宽度：交给 Tk 按**当前字体**自己算，不写死像素 ----
         # 以前写死 width=330，那是个只在 Windows（Segoe UI 9pt）成立的值：
@@ -1242,7 +1250,8 @@ class App(object):
         bot.pack(fill="both", expand=True)
 
         ttk.Label(bot, text="测试输出").pack(anchor="w")
-        self.log = tk.Text(bot, height=10, wrap="word", state="disabled")
+        self.log = tk.Text(bot, height=10, wrap="word", state="disabled",
+                           **theme.text_opts())
         self.log.pack(side="left", fill="both", expand=True)
         lsb = ttk.Scrollbar(bot, orient="vertical", command=self.log.yview)
         lsb.pack(side="right", fill="y")
@@ -1552,7 +1561,7 @@ class App(object):
             # Listbox 没有"改某行文字"的方法，只能按行号删掉重插
             self.sel_box.delete(i)
             self.sel_box.insert(i, text)
-            self.sel_box.itemconfig(i, background=bg)
+            self.sel_box.itemconfig(i, background=bg, foreground=SEL_FG)
         # 表多到列表装不下时，把正在测的那行滚进可视区
         if self.sel_active in self.sel_box_keys:
             self.sel_box.see(self.sel_box_keys.index(self.sel_active))
@@ -1595,7 +1604,7 @@ class App(object):
         ps = presets(self.cfg)
         if not ps:
             ttk.Label(self.preset_box, text="（配置文件中没有预设组）",
-                      foreground="#888").pack(anchor="w")
+                      foreground=HINT).pack(anchor="w")
             return
         # 每行放 4 个，自动换行
         row = None
@@ -1765,13 +1774,14 @@ class App(object):
         r += 1
         ttk.Label(f1, text="表间暂停（默认）").grid(row=r, column=0,
                                                 sticky="w", pady=4)
-        pause_var = tk.StringVar(
-            value="yes" if self.cfg.get("pause_between", True) else "no")
-        ttk.Combobox(f1, textvariable=pause_var, width=8,
-                     values=["yes", "no"], state="readonly"
-                     ).grid(row=r, column=1, sticky="w", pady=4)
+        # 布尔量统一用滑动开关（原来是 yes/no 下拉框：多一次点击，
+        # 而且看着像还有第三种状态）。取值直接 var.get() → bool。
+        pause_var = tk.BooleanVar(
+            value=bool(self.cfg.get("pause_between", True)))
+        ToggleSwitch(f1, variable=pause_var).grid(row=r, column=1,
+                                                  sticky="w", pady=4)
         ttk.Label(f1, text="手动多选时生效",
-                  foreground="#777").grid(row=r, column=2, sticky="w", padx=8)
+                  foreground=HINT).grid(row=r, column=2, sticky="w", padx=8)
         r += 1
         ttk.Label(f1, text="导出格式").grid(row=r, column=0, sticky="w", pady=4)
         fmt_var = tk.StringVar(value=fmt_suffix(self.cfg).lstrip(".").lower())
@@ -1779,7 +1789,7 @@ class App(object):
                      values=["xlsx", "csv"], state="readonly"
                      ).grid(row=r, column=1, sticky="w", pady=4)
         ttk.Label(f1, text="结果文件格式；csv 通用性最好，xlsx 带表头样式",
-                  foreground="#777").grid(row=r, column=2, sticky="w", padx=8)
+                  foreground=HINT).grid(row=r, column=2, sticky="w", padx=8)
         # 切换格式时同步改当前输出文件名后缀（否则主窗口还留着旧后缀）
         def _sync_fmt(*_):
             want = ".csv" if fmt_var.get().strip().lower() == "csv" else ".xlsx"
@@ -1800,12 +1810,12 @@ class App(object):
         r += 1
         ttk.Label(f1, text="射频列裁剪").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Label(f1, text="固定：不输出 OFFSET / SR（射频无此概念）",
-                  foreground="#777").grid(row=r, column=1, columnspan=2,
+                  foreground=HINT).grid(row=r, column=1, columnspan=2,
                                          sticky="w", pady=4)
         r += 1
         ttk.Label(f1, text="卫星列裁剪").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Label(f1, text="固定：不输出 LEVEL（卫星只报 POWER）",
-                  foreground="#777").grid(row=r, column=1, columnspan=2,
+                  foreground=HINT).grid(row=r, column=1, columnspan=2,
                                          sticky="w", pady=4)
         # ---- 断线自动重连（仪器走 WiFi 时链路会抖）----
         # 做成一行（开关 + 间隔），否则 f1 会超出窗口高度把下面的分频段参数挤掉
@@ -1814,19 +1824,17 @@ class App(object):
                                             pady=4)
         rrow = ttk.Frame(f1)
         rrow.grid(row=r, column=1, columnspan=2, sticky="w", pady=4)
-        auto_var = tk.StringVar(
-            value="yes" if self.cfg.get("auto_reconnect", True) else "no")
-        ttk.Combobox(rrow, textvariable=auto_var, width=5,
-                     values=["yes", "no"], state="readonly"
-                     ).pack(side="left")
-        ttk.Label(rrow, text="每", foreground="#777").pack(side="left",
+        auto_var = tk.BooleanVar(
+            value=bool(self.cfg.get("auto_reconnect", True)))
+        ToggleSwitch(rrow, variable=auto_var).pack(side="left")
+        ttk.Label(rrow, text="每", foreground=HINT).pack(side="left",
                                                          padx=(8, 2))
         e_ri = ttk.Entry(rrow, width=6, justify="right")
         e_ri.insert(0, str(self.cfg.get("reconnect_interval", 10.0)))
         e_ri.pack(side="left")
         ttk.Label(rrow, text="秒自动重连（最小 2 秒）；"
                              "断线后测试暂停，恢复即从当前频点续跑",
-                  foreground="#777").pack(side="left", padx=(2, 0))
+                  foreground=HINT).pack(side="left", padx=(2, 0))
 
         # ---- 分频段：射频 / 卫星 两栏并排，一目了然 ----
         r += 1
@@ -1846,7 +1854,7 @@ class App(object):
             lf = ttk.LabelFrame(band_box, text=title, padding=10)
             lf.grid(row=0, column=col, sticky="nsew",
                     padx=(0, 6) if col == 0 else (6, 0))
-            ttk.Label(lf, text=hint, foreground="#888").grid(
+            ttk.Label(lf, text=hint, foreground=HINT).grid(
                 row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
             for i, (label, key, dflt) in enumerate((
                     ("稳定等待 (秒)", "settle_" + sfx,
@@ -1866,7 +1874,7 @@ class App(object):
 
         ttk.Label(f1, text="锁定失败时自动重试：每次把稳定等待 +步进 秒；"
                            "用尽仍失败会记为「锁定失败」并写入结果表",
-                  foreground="#777", justify="left"
+                  foreground=HINT, justify="left"
                   ).grid(row=r + 1, column=0, columnspan=3,
                          sticky="w", pady=(0, 4))
 
@@ -1877,14 +1885,14 @@ class App(object):
                  ).pack(anchor="w")
         ttk.Label(f2, text="文件名可用 {date8} 8位日期 / {date6} 6位日期；"
                            "第4列省略时按全局默认",
-                  foreground="#777").pack(anchor="w")
+                  foreground=HINT).pack(anchor="w")
         tbox = ttk.Frame(f2)
         tbox.pack(fill="both", expand=True, pady=4)
         tbox.rowconfigure(0, weight=1)
         tbox.columnconfigure(0, weight=1)
         # wrap="char"：长行自动折行显示，内容不会被截断。
         # tkinter 的折行只是显示层，get() 取回的仍是原行，按 | 切分不受影响。
-        txt = tk.Text(tbox, height=16, wrap="char")
+        txt = tk.Text(tbox, height=16, wrap="char", **theme.text_opts())
         vsb2 = ttk.Scrollbar(tbox, orient="vertical", command=txt.yview)
         txt.configure(yscrollcommand=vsb2.set)
         txt.grid(row=0, column=0, sticky="nsew")
@@ -1924,7 +1932,7 @@ class App(object):
             row=rl, column=2, sticky="w")
         rl += 1
         ttk.Label(fl, text="留空 = 当前工作目录（程序所在目录）",
-                  foreground="#777").grid(row=rl, column=1, sticky="w")
+                  foreground=HINT).grid(row=rl, column=1, sticky="w")
         rl += 1
         ttk.Label(fl, text="日志文件名").grid(row=rl, column=0, sticky="w", pady=4)
         e_logname = ttk.Entry(fl, width=30)
@@ -1937,32 +1945,29 @@ class App(object):
         ttk.Label(fl, text="时间记录", font=("", 9, "bold")).grid(
             row=rl, column=0, columnspan=3, sticky="w", pady=(0, 6))
         rl += 1
-        ts_var = tk.StringVar(
-            value="yes" if self.cfg.get("log_timestamps", True) else "no")
+        ts_var = tk.BooleanVar(
+            value=bool(self.cfg.get("log_timestamps", True)))
         ttk.Label(fl, text="行首时戳").grid(row=rl, column=0, sticky="w", pady=4)
-        ttk.Combobox(fl, textvariable=ts_var, width=6, state="readonly",
-                     values=["yes", "no"]).grid(row=rl, column=1, sticky="w",
-                                                padx=(6, 6))
+        ToggleSwitch(fl, variable=ts_var).grid(row=rl, column=1, sticky="w",
+                                               padx=(6, 6))
         ttk.Label(fl, text="每行日志前加 [HH:MM:SS.mmm]",
-                  foreground="#777").grid(row=rl, column=2, sticky="w")
+                  foreground=HINT).grid(row=rl, column=2, sticky="w")
         rl += 1
-        tm_var = tk.StringVar(
-            value="yes" if self.cfg.get("log_timing", True) else "no")
+        tm_var = tk.BooleanVar(
+            value=bool(self.cfg.get("log_timing", True)))
         ttk.Label(fl, text="频点耗时").grid(row=rl, column=0, sticky="w", pady=4)
-        ttk.Combobox(fl, textvariable=tm_var, width=6, state="readonly",
-                     values=["yes", "no"]).grid(row=rl, column=1, sticky="w",
-                                                padx=(6, 6))
+        ToggleSwitch(fl, variable=tm_var).grid(row=rl, column=1, sticky="w",
+                                               padx=(6, 6))
         ttk.Label(fl, text="每个频点记：调谐/等待/总计 秒数（写入日志与表格）",
-                  foreground="#777").grid(row=rl, column=2, sticky="w")
+                  foreground=HINT).grid(row=rl, column=2, sticky="w")
         rl += 1
-        cm_var = tk.StringVar(
-            value="yes" if self.cfg.get("log_cmd_timing", False) else "no")
+        cm_var = tk.BooleanVar(
+            value=bool(self.cfg.get("log_cmd_timing", False)))
         ttk.Label(fl, text="命令级时间").grid(row=rl, column=0, sticky="w", pady=4)
-        ttk.Combobox(fl, textvariable=cm_var, width=6, state="readonly",
-                     values=["yes", "no"]).grid(row=rl, column=1, sticky="w",
-                                                padx=(6, 6))
+        ToggleSwitch(fl, variable=cm_var).grid(row=rl, column=1, sticky="w",
+                                               padx=(6, 6))
         ttk.Label(fl, text="每条命令的发起时刻与耗时（日志量较大）",
-                  foreground="#777").grid(row=rl, column=2, sticky="w")
+                  foreground=HINT).grid(row=rl, column=2, sticky="w")
         rl += 1
         ttk.Separator(fl, orient="horizontal").grid(
             row=rl, column=0, columnspan=3, sticky="ew", pady=10)
@@ -1973,7 +1978,7 @@ class App(object):
             row=rl, column=0, sticky="w", pady=4)
         ttk.Label(fl, text="与结果文件同目录同主名（每次覆盖），只含本次测试，"
                            "便于调试时单独打开",
-                  foreground="#777").grid(row=rl, column=1, columnspan=2,
+                  foreground=HINT).grid(row=rl, column=1, columnspan=2,
                                           sticky="w", padx=(6, 0))
         rl += 1
         ttk.Separator(fl, orient="horizontal").grid(
@@ -1983,7 +1988,7 @@ class App(object):
                    command=lambda: self._view_log(win)).grid(
             row=rl, column=0, sticky="w")
         ttk.Label(fl, text="查看单一日志文件末尾（跨次累积，与上面的独立日志无关）",
-                  foreground="#777").grid(row=rl, column=1, columnspan=2,
+                  foreground=HINT).grid(row=rl, column=1, columnspan=2,
                                           sticky="w", padx=(6, 0))
 
         # ---- 原始 json ----
@@ -1995,7 +2000,7 @@ class App(object):
         jbox.pack(fill="both", expand=True, pady=4)
         jbox.rowconfigure(0, weight=1)
         jbox.columnconfigure(0, weight=1)
-        raw = tk.Text(jbox, height=18, wrap="none")
+        raw = tk.Text(jbox, height=18, wrap="none", **theme.text_opts())
         vsb3 = ttk.Scrollbar(jbox, orient="vertical", command=raw.yview)
         hsb3 = ttk.Scrollbar(jbox, orient="horizontal", command=raw.xview)
         raw.configure(yscrollcommand=vsb3.set, xscrollcommand=hsb3.set)
@@ -2040,15 +2045,13 @@ class App(object):
                     base["port"] = int(e_port.get().strip())
                 except ValueError:
                     base["port"] = 2222
-                base["pause_between"] = pause_var.get().strip().lower() in (
-                    "yes", "y", "true", "1", "on", "是")
+                base["pause_between"] = bool(pause_var.get())
                 base["export_format"] = (
                     "csv" if fmt_var.get().strip().lower() == "csv"
                     else "xlsx")
                 base["export_promax"] = bool(promax_var.get())
                 # ---- 断线自动重连 ----
-                base["auto_reconnect"] = auto_var.get().strip().lower() in (
-                    "yes", "y", "true", "1", "on", "是")
+                base["auto_reconnect"] = bool(auto_var.get())
                 try:
                     base["reconnect_interval"] = max(
                         2.0, float(e_ri.get().strip()))
@@ -2079,8 +2082,7 @@ class App(object):
                 for key, var in (("log_timestamps", ts_var),
                                  ("log_timing", tm_var),
                                  ("log_cmd_timing", cm_var)):
-                    base[key] = var.get().strip().lower() in (
-                        "yes", "y", "true", "1", "on", "是")
+                    base[key] = bool(var.get())
                 base["log_separate"] = bool(sep_var.get())
                 if ps:
                     base["presets"] = ps
@@ -2925,7 +2927,7 @@ class App(object):
 
         top = ttk.Frame(win)
         top.pack(fill="x", padx=8, pady=6)
-        ttk.Label(top, text=path, foreground="#555").pack(side="left")
+        ttk.Label(top, text=path, foreground=HINT).pack(side="left")
         size = os.path.getsize(path)
         ttk.Label(top, text="  %.1f KB" % (size / 1024.0),
                   foreground="#999").pack(side="left")
@@ -2934,7 +2936,7 @@ class App(object):
         box.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
-        txt = tk.Text(box, wrap="none")
+        txt = tk.Text(box, wrap="none", **theme.text_opts())
         vsb = ttk.Scrollbar(box, orient="vertical", command=txt.yview)
         hsb = ttk.Scrollbar(box, orient="horizontal", command=txt.xview)
         txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)

@@ -187,6 +187,12 @@ Python 要额外 `brew install python-tk`）。打开结果文件按平台自动
 而是由控件按当前系统字体算出来的自然宽度（macOS 13pt 比 Windows 9pt 宽约 1/3），
 所以换平台、改系统字号都不会出现"内容被裁 / 那一列被挤成一条"。
 
+**深色模式**：macOS 开深色后界面自动跟深色。ttk 控件本来就会跟随系统外观，但
+`Listbox` / `Text` 这类传统 tk 控件不会 —— 它们的底还是浅色、字却被系统设成浅色，
+会出现"白字白底"（「已选频道表」整列看不见）。所以这几类控件由 `promax_theme.py`
+**显式配色**，深浅两套色板都做了对比度自检（见 `_test_theme.py`）。
+Windows / Linux 不跟随深色：两边的 ttk 主题恒为浅色，只把列表涂黑反而更别扭。
+
 ### 自己打包成 exe（PyInstaller）
 
 项目根目录的 `pm_installer.bat` 就是官方打包命令，双击即可：
@@ -257,6 +263,7 @@ python _test_retest.py            # 重测失败频道：只补测未成功的�
 python _test_promax.py            # Promax 格式导出 / 转换（结构、编码、口径、GUI 两个入口）
 python _test_platform.py          # 跨平台打开文件（win/mac/linux）+ 文件名归属不被冲
 python _test_layout.py            # 右列宽度：随字体自适应 / 不裁剪 / 窄窗不被挤扁
+python _test_theme.py             # 深色模式配色对比度 / 滑动开关 / 设置窗布尔项落盘
 python _test_plan_edit.py         # 频道表编辑（未知字段保留/模拟+2.75/增删改）+ zip 备份还原 + 窗口
 python _test_plan_sync.py         # 与设备同步：单表路线 / 固件不认时降级整装 ZIP / CRC 反推 / 转义
 ```
@@ -304,6 +311,8 @@ CH/
 | `promax_plan_dump.py` | 频道表 XML 解析（离线） |
 | `promax_telnet_test.py` | Telnet 连接层与命令封装 |
 | `promax_gui_config.py` | 配置层（json + 滚动备份到 `bak/` + 原子写） |
+| `promax_theme.py` | 深浅色色板 + 传统 tk 控件（Listbox/Text）配色 |
+| `promax_widgets.py` | 自绘控件（滑动开关 ToggleSwitch） |
 | `promax_plan_write.py` | 写 Promax 仪器格式 XML / 读结果文件（也可单独当命令行用） |
 | `promax_plan_edit.py` | 频道表读写与增删改（就地改 XML，保住未知字段） |
 | `promax_plan_editor_gui.py` | 频道表管理窗口（编辑 / 备份 / 与设备同步） |
@@ -322,6 +331,7 @@ CH/
 | `_test_promax.py` | Promax 格式导出测试（XML 结构 / 编码 / 数值口径 / xlsx·csv 转换） |
 | `_test_platform.py` | 跨平台测试（打开文件三分支 + 预设文件名不被自动命名冲掉） |
 | `_test_layout.py` | 右列布局测试（宽度随字体自适应 / 内容不被裁 / 窄窗不被挤扁 / pack 顺序） |
+| `_test_theme.py` | 深色模式配色测试（对比度 / 色板完整性）+ 滑动开关 + 设置窗布尔项落盘 |
 | `_test_plan_edit.py` | 频道表编辑器测试（未知字段保留 / 模拟 +2.75 / 增删改 + zip 备份还原 + 窗口全链路） |
 | `_test_plan_sync.py` | 设备同步集成测试（单表 / 降级整装 / IAC 转义 / CRC 换算法，对着模拟器跑） |
 | `_probe_io.py` | **真机**协议探测脚本（只读；`--upload` 才写，读完即删） |

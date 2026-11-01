@@ -32,6 +32,7 @@ SUITES = [
     ("_test_progress.py",  "进度反馈 / 进度条", True),
     ("_test_highlight.py", "右侧列表高亮", True),
     ("_test_layout.py",    "右列布局自适应", True),
+    ("_test_theme.py",     "深色模式配色 / 滑动开关", True),
     ("_test_platform.py",  "跨平台打开文件 / 文件名归属", True),
     ("_test_plan_edit.py", "频道表编辑 / zip 备份", True),
     ("_test_plan_sync.py", "与设备同步（模拟器四条路线）", True),

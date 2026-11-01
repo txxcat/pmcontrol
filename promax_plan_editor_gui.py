@@ -21,6 +21,10 @@ from tkinter import filedialog, messagebox, ttk
 
 import promax_plan_backup as B
 import promax_plan_edit as E
+import promax_theme as theme
+
+HINT = theme.c("hint")           # 次要说明文字（深色下自动变浅灰）
+DANGER = theme.c("danger")       # 警示文字（深色下用亮红，纯 #c00 在暗底上看不清）
 
 # 表格列：内部键 → (表头, 宽度, 对齐)
 COLS = (("idx", "#", 44, "center"),
@@ -71,7 +75,7 @@ class PlanEditorWindow(tk.Toplevel):
         ttk.Label(top, text="频道表目录：").pack(side="left")
         self.dir_var = tk.StringVar(value=self.source)
         ttk.Label(top, textvariable=self.dir_var,
-                  foreground="#555").pack(side="left")
+                  foreground=HINT).pack(side="left")
         ttk.Button(top, text="备份全部（zip）", command=self.backup_all
                    ).pack(side="right")
         ttk.Button(top, text="还原备份…", command=self.restore_backup
@@ -97,7 +101,7 @@ class PlanEditorWindow(tk.Toplevel):
                                  % (title, E.KIND_DIRS[kind]), padding=6)
             box.pack(side="left", fill="both", expand=True, padx=(0, 6))
             lb = tk.Listbox(box, width=28, height=22, exportselection=False,
-                            activestyle="none")
+                            activestyle="none", **theme.listbox_opts())
             lb.pack(fill="both", expand=True)
             lb.bind("<<ListboxSelect>>", lambda e, k=kind: self._on_pick(k))
             self.lists[kind] = lb
@@ -165,7 +169,7 @@ class PlanEditorWindow(tk.Toplevel):
 
         self.dirty_var = tk.StringVar(value="")
         ttk.Label(save, textvariable=self.dirty_var,
-                  foreground="#c00").pack(side="left", padx=8)
+                  foreground=DANGER).pack(side="left", padx=8)
 
         # ---- 设备同步 ----
         sync = ttk.LabelFrame(right, text="与设备同步", padding=6)
@@ -178,7 +182,7 @@ class PlanEditorWindow(tk.Toplevel):
                    ).pack(side="left")
         self.sync_var = tk.StringVar(value="")
         ttk.Label(sync, textvariable=self.sync_var,
-                  foreground="#555").pack(side="left", padx=10)
+                  foreground=HINT).pack(side="left", padx=10)
 
         # ---- 状态栏 ----
         self.status_var = tk.StringVar(value="就绪")
@@ -823,7 +827,7 @@ class _PlanNameDialog(object):
         ttk.Entry(self.lnb_row, textvariable=self.lnb_var, width=10
                   ).pack(side="left")
         ttk.Label(self.lnb_row, text="C 波段 5150 / Ku 11300",
-                  foreground="#777").pack(side="left", padx=6)
+                  foreground=HINT).pack(side="left", padx=6)
 
         bf = ttk.Frame(win)
         bf.pack(fill="x", padx=16, pady=12, side="bottom")
@@ -905,7 +909,7 @@ class _ChannelDialog(object):
         hint = ("模拟频道请填**图像载频**（仪器表里存的是它 +2.75MHz 的伴音载频）"
                 if plan.kind == E.KIND_TER else
                 "卫星表填**下行频率**（仪器里存 downlink，调谐时自动换算中频）")
-        ttk.Label(win, text=hint, foreground="#666",
+        ttk.Label(win, text=hint, foreground=HINT,
                   wraplength=420).pack(anchor="w", padx=16)
 
         bf = ttk.Frame(win, padding=(16, 8))
@@ -947,7 +951,8 @@ class _PickDialog(object):
         ttk.Label(win, text=title, padding=(12, 10, 12, 4)).pack(anchor="w")
         box = ttk.Frame(win, padding=(12, 0))
         box.pack(fill="both", expand=True)
-        self.lb = tk.Listbox(box, exportselection=False)
+        self.lb = tk.Listbox(box, exportselection=False,
+                             **theme.listbox_opts())
         self.lb.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(box, orient="vertical", command=self.lb.yview)
         sb.pack(side="right", fill="y")
