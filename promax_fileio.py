@@ -54,6 +54,13 @@ MAX_FILE = 8 * 1024 * 1024    # 单张表不可能这么大，超了就是协议
 
 TAGS = {"TER": "TER-CH", "SAT": "SAT-CH"}
 
+# 整装（全安装包）下载的命令形态，按顺序试（手册三种写法都出现过）
+ZIP_FORMS = (
+    "*?INSTALLATION CURRENT ZIP BLOCK={block}",   # 手册细则页原样
+    "*?INSTALLATION FILE ZIP BLOCK={block}",      # 手册命令总表里的名字
+    "*?INSTALLATION ZIP BLOCK={block}",           # 不带 CURRENT 的兜底写法
+)
+
 
 class FileIOError(PromaxError):
     """频道表文件传输错误（用户可见）"""
@@ -322,8 +329,28 @@ class PlanIO(object):
                 pass
 
     # ------------------------------------------------------------ 列举
-    def counts(self):
-        """设备上有多少张表：返回 {"TER": n, "SAT": n, "name": 当前安装名}"""
+    def counts(self, attempts=2):
+        """设备上有多少张表：返回 {"TER": n, "SAT": n, "name": 当前安装名}
+
+        🔴 这是**整个同步流程的第一条命令**，最容易被"仪器侧还挂着半死旧会话"
+        咬到（症状：连得上、发得出去、一个字节都不回，5 秒后行超时）。
+        所以失败时自己重连（SO_LINGER RST 释放旧会话）再试一次 ——
+        界面上就少一次"读取设备表清单失败"。
+        """
+        last = None
+        for i in range(max(1, attempts)):
+            try:
+                return self._counts_once()
+            except (PromaxError, FileIOError) as e:
+                last = e
+                if i + 1 >= max(1, attempts):
+                    break
+                self._log("读表数失败（%s），重连后再试一次" % e)
+                self.conn.reconnect()
+                self.link = RawLink(self.conn, verbose=self.verbose)
+        raise last
+
+    def _counts_once(self):
         self.link.drain()
         self.link.send(b"*?INSTALLATION CURRENT" + CR_B)
         line = self._read_resp_line(tries=4, timeout=5.0)
@@ -340,45 +367,75 @@ class PlanIO(object):
         self.link.drain(quiet=0.08)
         return out
 
-    def plan_names(self, kind):
+    def plan_names(self, kind, strict=False):
         """列出某频段所有表名。
 
         手册：`*?INSTALLATION CURRENT TER-CH=<序号>` 取第 n 张的名字
         （PDF 里这张表排版乱了，响应形状靠实测；这里做宽松解析）
 
-        🔴 被拒时设备只回一个 NAK、**不发响应行**（31.17 实测如此）。
-           所以发完命令先看控制字节：拿到 NAK 立刻抛错，
-           不然要白等好几轮行超时（每轮 8 秒 × 6 轮）。
+        🔴 **序号基准因固件而异**（2026-11-02 真机实测）：
+           `*?INSTALLATION CURRENT` 报 `TER-CH=5`，但 `TER-CH=5` 回 NAK、
+           `TER-CH=1` 有名字 → 这台是 **0 基**（0~4）；手册和模拟器是 1 基。
+           以前写死 `range(1, n+1)`：0 基固件在第 n 个必然 NAK，整条列举当场
+           报错 → GUI 里就是"读取设备表清单失败"，然后降级整装 ZIP 也失败。
+        所以现在**从 0 扫到 n+1**，两种基准都能取全：
+          · NAK 只表示"这个序号没有表"，跳过，不算失败；
+          · 行超时也只跳过（一个序号没答不代表整条路不通）；
+          · 名字去重后返回，可能少于 n —— 由调用方判断够不够。
         """
         tag = TAGS[kind]
         n = self.counts()[kind]
-        names = []
-        for i in range(1, n + 1):
+        names, seen = [], set()
+        for i in range(0, max(n, 0) + 2):
             self.link.drain(quiet=0.05)
-            self.link.send(("*?INSTALLATION CURRENT %s=%d" % (tag, i)).encode("ascii") + CR_B)
-            c = None
+            self.link.send(("*?INSTALLATION CURRENT %s=%d" % (tag, i)).encode("ascii")
+                           + CR_B)
             try:
                 c = self.link.wait_ctrl((ACK, NAK), timeout=2.0)
             except FileIOError as e:
                 # 有的固件不发控制字节、直接给响应行 → 交给下面读行
-                self._log("取表名前没等到控制字节（%s），改为直接读行" % e)
+                self._log("序号 %d 没等到控制字节（%s），改为直接读行" % (i, e))
+                c = None
             if c == NAK:
-                raise FileIOError("设备拒绝了「按序号取表名」（NAK）：%s=%d"
-                                  % (tag, i))
-            line = self._read_resp_line(tries=3, timeout=4.0)
+                self._log("序号 %d：设备 NAK（该序号没有表）" % i)
+                continue
+            try:
+                line = self._read_resp_line(tries=2, timeout=2.0)
+            except FileIOError as e:
+                self._log("序号 %d 取名字失败：%s" % (i, e))
+                continue
             kv = parse_kv(line)
-            name = kv.get(tag) or kv.get("NAME") or ""
-            name = name.strip()
-            if name:
+            name = plain_name(kv.get(tag) or kv.get("NAME") or "")
+            if name and name not in seen:
+                seen.add(name)
                 names.append(name)
+        if not names and strict:
+            raise FileIOError("按序号取不到任何表名（%s= 命令可能被这台固件关掉了）"
+                              % tag)
         return names
 
     # ------------------------------------------------------------ 下载
     def download(self, kind, name, dest, block=None):
         """把设备上的一张表存到 dest。返回 (dest, 字节数, crc 算法名)
 
-        若发现数据被 telnet 转义过（0xFF → 0xFF 0xFF），会**重建会话**后用
-        解转义模式再下一遍 —— 一份文件里不可能混着两种编码，所以只可能整体重来。
+        表名写法两种都试：设备回报的是 `NAME=<表名>.XML`（带扩展名），
+        但命令里可能要 `<表名>`（模拟器/老固件）—— 见 `name_variants`。
+        """
+        last = None
+        for cand in name_variants(name):
+            try:
+                return self._try_download(kind, cand, dest, block)
+            except FileIOError as e:
+                last = e
+                self._log("表名 %r 没下成（%s），换写法再试" % (cand, e))
+        if last is not None:
+            raise last
+        raise FileIOError("表名是空的，没法下载")
+
+    def _try_download(self, kind, name, dest, block=None):
+        """下一遍；若判定数据被 telnet 转义过（0xFF → 0xFF 0xFF），重连后重收
+
+        一份文件里不可能混着两种编码，所以只可能整体重来。
         """
         try:
             return self._download_once(kind, name, dest, block)
@@ -516,10 +573,40 @@ class PlanIO(object):
 
     # ------------------------------------------------------------ 整装
     def download_zip(self, dest):
-        """整装下载：`*?INSTALLATION CURRENT ZIP BLOCK=` → 存成 zip"""
-        self.link.drain()
-        self.link.send(("*?INSTALLATION CURRENT ZIP BLOCK=%d"
-                        % self.block).encode("ascii") + CR_B)
+        """整装下载：`*?INSTALLATION CURRENT ZIP BLOCK=` → 存成 zip
+
+        手册（v2.2 命令总表）把这条叫 `INSTALLATION FILE ZIP`，细则页给的却是
+        `*?INSTALLATION CURRENT ZIP BLOCK=`；真机对后者回 NAK
+        （2026-11-02 实测）。所以**几种写法 + 两档块大小都试一遍**，
+        全失败才报错，并把每次的应答带上，省得再来一轮瞎猜。
+        """
+        attempts = [(ZIP_FORMS[0], self.block), (ZIP_FORMS[0], 512),
+                    (ZIP_FORMS[1], self.block), (ZIP_FORMS[2], self.block)]
+        tries, last = [], None
+        for form, block in attempts:
+            cmd = form.format(block=block)
+            try:
+                self.link.drain(quiet=0.1)
+            except Exception:
+                pass
+            try:
+                return self._download_zip_once(cmd, dest, block)
+            except (PromaxError, FileIOError) as e:
+                last = e
+                tries.append("%s → %s" % (cmd, e))
+                self._log("整装命令不认：%s（%s）" % (cmd, e))
+                # 失败后会话状态不可信（可能收了半个 SIZE 行）→ 重建
+                try:
+                    self.conn.reconnect()
+                    self.link = RawLink(self.conn, verbose=self.verbose)
+                except Exception:
+                    pass
+        if not tries:
+            raise last
+        raise FileIOError("整装下载所有写法都失败：\n  " + "\n  ".join(tries))
+
+    def _download_zip_once(self, cmd, dest, block):
+        self.link.send(cmd.encode("ascii") + CR_B)
         c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
         if c == NAK:
             raise FileIOError("设备拒绝整装下载（NAK）")
@@ -528,7 +615,7 @@ class PlanIO(object):
         if size <= 0 or size > MAX_FILE:
             raise FileIOError("整装包大小不合理：%r" % line)
         self.link.send(ACK_B)
-        data = self._recv_blocks(size, self.block, tag="整装下载")
+        data = self._recv_blocks(size, block, tag="整装下载")
         ensure_dir(dest)
         with open(dest + ".tmp", "wb") as f:
             f.write(data)
@@ -580,6 +667,31 @@ def ensure_dir(path):
     d = os.path.dirname(os.path.abspath(path))
     if d and not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
+
+
+def plain_name(name):
+    """设备回报的表名可能带 `.XML`（真机 `NAME=<表名>.XML`）。
+
+    本程序的"表名"一律**不带扩展名**（落盘时才加 .XML），所以统一在这里剥掉；
+    否则下载会存成 `<表名>.XML.XML`。
+    """
+    n = (name or "").strip()
+    if n.upper().endswith(".XML"):
+        n = n[:-4]
+    return n
+
+
+def name_variants(name):
+    """同一个表在命令里的几种可能写法（按顺序试）。
+
+    真机回报带扩展名、模拟器不带 —— 谁也说不准命令要哪种，两种都试最省事。
+    """
+    n = (name or "").strip()
+    out = []
+    for c in (n, plain_name(n), n if n.upper().endswith(".XML") else n + ".XML"):
+        if c and c not in out:
+            out.append(c)
+    return out
 
 
 def download_with_retry(io, kind, name, dest, attempts=None):

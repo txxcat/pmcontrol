@@ -149,7 +149,9 @@ class Probe(object):
         try:
             r = self.conn.command("*VER")
             self.say("响应：%r" % (r,))
-            self.verdict_add("固件版本", True, str(r).strip()[:40])
+            ok = bool(r.get("ack") or r.get("lines"))
+            self.verdict_add("固件版本", ok,
+                             str(r.get("lines") or r.get("status") or "")[:40])
         except Exception as e:
             self.say("  !! 失败：%s" % e)
             self.verdict_add("固件版本", False, str(e))
@@ -175,54 +177,130 @@ class Probe(object):
             self.verdict_add("读表数", False, str(e))
             return {"TER": 0, "SAT": 0, "name": ""}
 
-    def probe_name_by_index(self):
-        self.head("3. 按序号取表名  *?INSTALLATION CURRENT TER-CH=1")
-        for kind, tag in (("射频", "TER-CH"), ("卫星", "SAT-CH")):
-            data = self.raw("*?INSTALLATION CURRENT %s=1" % tag, wait=2.0,
-                            title="name-%s" % tag)
-            has_nak = F.NAK in data
-            has_line = b"*" in data
-            self.verdict_add("按序号取表名（%s）" % kind,
-                             has_line and not (has_nak and not has_line),
-                             "NAK" if has_nak and not has_line else "有响应行")
+    def probe_name_by_index(self, info=None):
+        """逐个序号问一遍名字 —— 关键是把**序号基准**钉死。
+
+        真机（2026-11-02 实测）：`*?INSTALLATION CURRENT` 报
+        `TER-CH=5`，但 `TER-CH=5` 回 NAK、`TER-CH=1` 有名字 → 这台是 **0 基**。
+        客户端以前写死 1 基，第 n 个必 NAK → 列举整条报错（用户看到的
+        "读取设备表清单失败"）。所以这里 0~n+1 全扫，一次说清。
+        """
+        self.head("3. 序号扫描 0~n+1（确定序号基准，逐条记原始字节）")
+        info = info or {}
+        result = {"TER": [], "SAT": []}
+        for kind, tag in (("TER", "TER-CH"), ("SAT", "SAT-CH")):
+            n = int(info.get(kind) or 0)
+            if n <= 0:
+                self.say("  %s：设备报 0 张，跳过" % kind)
+                continue
+            self.say("")
+            self.say("· %s：设备报 %d 张 → 扫序号 0~%d" % (tag, n, n + 1))
+            dump = bytearray()
+            hits = []
+            for i in range(0, n + 2):
+                data = self._ask(idx_cmd(tag, i), wait=0.7)
+                # 分节标记用 ASCII：这个文件里混着原始二进制字节，
+                # 写进中文再 encode("ascii") 会当场炸（踩过）
+                dump += ("\n### %s=%d  (%d bytes)\n"
+                         % (tag, i, len(data))).encode("ascii")
+                dump += data
+                txt = clean_resp(printable(data).decode("latin-1"))
+                name = _name_of(txt, tag)
+                if F.NAK in data:
+                    shown = "[NAK]（这个序号没有表）"
+                elif name:
+                    hits.append(i)
+                    result[kind].append(name)
+                    shown = "%s=%s" % ("NAME" if "NAME=" in txt else tag, name)
+                elif txt:
+                    shown = txt[:80]
+                else:
+                    shown = "（无应答）"
+                self.say("    %s=%-2d → %s" % (tag, i, shown))
+            path = os.path.join(self.outdir, "raw-idx-%s.bin" % tag)
+            with open(path, "wb") as f:
+                f.write(bytes(dump))
+            self.say("    原始字节日志 → %s" % os.path.basename(path))
+
+            if hits == list(range(0, n)):
+                base = "0 基（0~%d 有效，%d 回 NAK）" % (n - 1, n)
+            elif hits == list(range(1, n + 1)):
+                base = "1 基（1~%d 有效，0 和 %d 回 NAK）" % (n, n + 1)
+            else:
+                base = "不规整：有名字的序号 = %s" % hits
+            self.say("    ⇒ 序号基准：%s" % base)
+            self.verdict_add("按序号取名（%s）" % kind, bool(hits),
+                             "%d/%d 张；%s" % (len(hits), n, base))
             self.reconnect()
+        return result
+
+    # ----------------------------------------------------------- 单条命令
+    def _ask(self, cmd, wait=0.7):
+        """发一条命令，等 `wait` 秒或收到 CR 就停，返回原始字节（不落盘）"""
+        if self.link is None:
+            self.connect()
+        try:
+            self.link.drain(quiet=0.1)
+            self.link.send(cmd.encode("latin-1") + bytes([13]))
+        except Exception as e:
+            self.say("    !! 发送失败：%s" % e)
+            return b""
+        import time
+        buf = bytearray()
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            try:
+                chunk = self.link._chunk(0.1)
+            except Exception:
+                break
+            if chunk:
+                buf.extend(chunk)
+                if 13 in chunk and len(buf) > 8:
+                    break
+        return bytes(buf)
 
     def probe_download(self, kind="TER", names=None):
         self.head("4. 单表下载  *?INSTALLATION CURRENT %s-CH=<名> BLOCK=1024" % kind)
-        names = names or []
+        names = [n for n in (names or []) if n]
         if not names:
             self.say("  （没有已知表名，跳过）")
             self.verdict_add("单表下载", False, "没有可用表名")
             return None
-        name = names[0]
-        self.say("用表名：%s" % name)
-        dest = os.path.join(self.outdir, "dl-%s-%s.XML"
-                            % (kind, safe(name)))
-        try:
-            io = F.PlanIO(self.conn, verbose=True)
-            dest, size, crc = io.download(kind, name, dest)
-            self.say("  ✔ 下载成功：%d 字节，CRC 算法 = %s" % (size, crc))
-            tmp = open(dest, "rb").read()
-            self.say("  文件开头：%r" % printable(tmp[:120]))
-            self.say("  是不是频道表：%s"
-                     % ("是" if b"CHANNEL-SET" in tmp[:400] else "**看不出**"))
-            self.verdict_add("单表下载", True, "%d 字节" % size)
-            self.verdict_add("CRC 算法", crc is not None, str(crc))
-            self.crc_name = crc
-            self.crc_known = crc is not None
-            self.verdict_add("telnet 转义",
-                             True,
-                             "需要解转义" if getattr(io.link, "iac_mode", "") == "esc"
-                             else "不需要（或未能判定）")
-            return (name, dest)
-        except Exception as e:
-            self.say("  !! 下载失败：%s" % e)
-            self.say("  （失败也要看上面的原始字节，所以这里退化为 raw 抓一次）")
-            self.verdict_add("单表下载", False, str(e))
-            self.reconnect()
-            self.raw("*?INSTALLATION CURRENT %s-CH=%s BLOCK=1024" % (kind, name),
-                     wait=3.0, title="dl-fallback")
-            return None
+        # 设备里的表名带不带 .XML 说不准（真机回 `NAME=<表名>.XML`）：两种都试
+        first = names[0]
+        cands = []
+        for c in (first, os.path.splitext(first)[0], first + ".XML"):
+            if c and c not in cands:
+                cands.append(c)
+        for name in cands:
+            self.say("· 用表名：%r" % name)
+            dest = os.path.join(self.outdir, "dl-%s-%s.XML"
+                                % (kind, safe(name)))
+            try:
+                io = F.PlanIO(self.conn, verbose=True)
+                dest, size, crc = io.download(kind, name, dest)
+                self.say("  ✔ 下载成功：%d 字节，CRC 算法 = %s" % (size, crc))
+                tmp = open(dest, "rb").read()
+                self.say("  文件开头：%r" % printable(tmp[:120]))
+                self.say("  是不是频道表：%s"
+                         % ("是" if b"CHANNEL-SET" in tmp[:400] else "**看不出**"))
+                self.verdict_add("单表下载", True, "%r 成功，%d 字节" % (name, size))
+                self.verdict_add("CRC 算法", crc is not None, str(crc))
+                self.crc_name = crc
+                self.crc_known = crc is not None
+                self.verdict_add(
+                    "telnet 转义", True,
+                    "需要解转义" if getattr(io.link, "iac_mode", "") == "esc"
+                    else "不需要（或未能判定）")
+                return (name, dest)
+            except Exception as e:
+                self.say("  !! 下载失败：%s" % e)
+                self.verdict_add("单表下载", False, "%r：%s" % (name, e))
+                self.reconnect()
+                self.raw("*?INSTALLATION CURRENT %s-CH=%s BLOCK=1024"
+                         % (kind, name), wait=3.0, title="dl-fallback")
+        self.say("  （三种表名写法都不行，看上面的 raw-* 原始字节）")
+        return None
 
     def probe_zip(self):
         self.head("5. 整装下载  *?INSTALLATION CURRENT ZIP BLOCK=1024")
@@ -320,10 +398,8 @@ class Probe(object):
             info = self.probe_counts()
             names = {}
             if info.get("TER") or info.get("SAT"):
-                # 用 zip 里的名字兜底：万一按序号取名不通，还能拿到表名
-                names = self.collect_names()
-            self.reconnect()
-            self.probe_name_by_index()
+                # 序号扫描顺带把表名全拿到（0 基 / 1 基都能扫出来）
+                names = self.probe_name_by_index(info)
             self.reconnect()
 
             got = None
@@ -331,11 +407,17 @@ class Probe(object):
                 got = self.probe_download("TER", names["TER"])
             elif names.get("SAT"):
                 got = self.probe_download("SAT", names["SAT"])
-            # 下载成功就顺带把 CRC 反推出来了（probe_download 里记的），
-            # 有了 CRC 才谈得上往仪器上传
+            # 下载成功才反推出 CRC —— 有了 CRC 才谈得上往仪器上传
             if not got:
                 self.say("")
-                self.say("（没下到表 → CRC 无从反推 → 测不了上传）")
+                self.say("（没下到表 → CRC 无从反推 → 测不了上传；"
+                         "下面试整装包，能下就把表名和 CRC 一起拿到）")
+                self.reconnect()
+                zp_names = self.collect_names()
+                if zp_names.get("TER") or zp_names.get("SAT"):
+                    got = self.probe_download(
+                        "TER" if zp_names.get("TER") else "SAT",
+                        zp_names.get("TER") or zp_names.get("SAT"))
             self.reconnect()
             self.probe_zip()
             self.reconnect()
@@ -390,6 +472,7 @@ class Probe(object):
             self.say("  [%s] %-22s %s" % ("可以" if ok else "不行", item, detail))
         self.say("")
         self.say("怎么读这份报告：")
+        self.say("  · 「按序号取名」那行会写清序号基准（0 基 / 1 基）—— 客户端两种都支持")
         self.say("  · 「单表下载 = 可以」→ 同步功能走主路（快，只动一张表）")
         self.say("  · 「单表下载 = 不行」但「整装下载 = 可以」→ 自动降级到整装 ZIP")
         self.say("  · 两个都不行 → 这台固件把文件命令关掉了，只能走 USB 导入导出")
@@ -403,6 +486,40 @@ class Probe(object):
 
 
 # ---------------------------------------------------------------- 工具
+def idx_cmd(tag, i):
+    """按序号取表名的命令（tag = TER-CH / SAT-CH）"""
+    return "*?INSTALLATION CURRENT %s=%d" % (tag, i)
+
+
+def _name_of(txt, tag=""):
+    """从响应文本里抠表名。
+
+    两种应答形状都见过：
+      · 真机：`*INSTALLATION NAME=<表名>.XML`
+      · 模拟器/部分固件：   `*INSTALLATION TER-CH=<表名>`
+    （值可能是序号 —— 那种不算名字）
+    """
+    kv = F.parse_kv("*" + clean_resp(txt))
+    for key in ("NAME", tag, "TER-CH", "SAT-CH"):
+        if not key:
+            continue
+        v = (kv.get(key) or "").strip()
+        if v and not v.isdigit():
+            return v
+    return ""
+
+
+def clean_resp(txt):
+    """把响应里的控制字节、回显前缀去掉，压成一行干净文本（诊断展示用）"""
+    t = txt or ""
+    k = t.find("*")
+    if k >= 0:
+        t = t[k + 1:]
+    for ch in ("\x11", "\x13", "\x15", "\x06", "\r", "\n", "\t"):
+        t = t.replace(ch, " ")
+    return " ".join(t.split())
+
+
 def safe(s):
     return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in s)[:40]
 

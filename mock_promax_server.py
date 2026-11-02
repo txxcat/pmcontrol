@@ -574,6 +574,7 @@ def dispatch(body, query):
 #       --io-no-tag        `*?INSTALLATION CURRENT TER-CH=1` 一律 NAK（复现 31.17）
 IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{表名: bytes}
 IO_CFG = {"crc": "crc8-0x07", "esc": False, "no_tag": False,
+          "idx0": False, "zip_nak": False, "name_ext": False,
           "block": 1024, "dir": None}
 IO_RECV = {"on": False}
 IO_ENABLED = True
@@ -716,6 +717,13 @@ def _io_recv_exact(conn, n, timeout=20.0):
     return bytes(out)
 
 
+def _is_zip_cmd(k):
+    """整装下载的三种写法（手册命令总表 / 细则页 / 去掉 CURRENT）"""
+    return (k.startswith("INSTALLATION CURRENT ZIP")
+            or k.startswith("INSTALLATION FILE ZIP")
+            or k.startswith("INSTALLATION ZIP"))
+
+
 def fileio_respond(conn, query, body):
     """处理 INSTALLATION 文件命令。处理了就返回 True（自己负责 XOFF/ACK 时序）。
 
@@ -743,10 +751,21 @@ def fileio_respond(conn, query, body):
         except ValueError:
             idx = 0
         names = sorted(IO_FILES[kind])
-        if not (1 <= idx <= len(names)):
-            conn.sendall(bytes([XOFF, NAK, XON]))
-            return True
-        out = "*INSTALLATION %s-CH=%s" % (kind, names[idx - 1])
+        if IO_CFG["idx0"]:
+            # 0 基：0~n-1 有效，n 回 NAK（真机实测如此）
+            if not (0 <= idx < len(names)):
+                conn.sendall(bytes([XOFF, NAK, XON]))
+                return True
+            pick = names[idx]
+        else:
+            if not (1 <= idx <= len(names)):
+                conn.sendall(bytes([XOFF, NAK, XON]))
+                return True
+            pick = names[idx - 1]
+        if IO_CFG["name_ext"]:
+            out = "*INSTALLATION NAME=%s.XML" % pick      # 真机形状
+        else:
+            out = "*INSTALLATION %s-CH=%s" % (kind, pick)
         conn.sendall(bytes([XOFF, ACK]))
         time.sleep(0.05)
         conn.sendall(out.encode("ascii", "replace") + bytes([CR, LF]) + bytes([XON]))
@@ -761,7 +780,12 @@ def fileio_respond(conn, query, body):
             return True
         kind = m_tag.group(1).upper()
         name = m_tag.group(2).strip()
-        data = IO_FILES[kind].get(name)
+        if IO_CFG["name_ext"]:
+            # 只认带扩展名的写法：不带就 NAK（真机很可能就是这样）
+            key = name[:-4] if name.upper().endswith(".XML") else None
+            data = IO_FILES[kind].get(key) if key else None
+        else:
+            data = IO_FILES[kind].get(name)
         if data is None:
             conn.sendall(bytes([XOFF, NAK, XON]))
             log("  [IO] NAK：没有 %s %s" % (kind, name))
@@ -778,7 +802,11 @@ def fileio_respond(conn, query, body):
         return True
 
     # ---------- 整装下载 ----------
-    if query and k.startswith("INSTALLATION CURRENT ZIP"):
+    if query and _is_zip_cmd(k):
+        if IO_CFG["zip_nak"] and "CURRENT ZIP" in k:
+            conn.sendall(bytes([XOFF, NAK, XON]))
+            log("  [IO] NAK 整装（--io-zip-nak，复现真机对 CURRENT ZIP 的拒绝）")
+            return True
         import io as _io
         import zipfile as _zip
         buf = _io.BytesIO()
@@ -1167,6 +1195,12 @@ def main():
                     help="把数据里的 0xFF 按 telnet 转义成 0xFF 0xFF（考客户端解转义）")
     ap.add_argument("--io-no-tag", action="store_true",
                     help="`*?INSTALLATION CURRENT TER-CH=...` 一律 NAK（复现 31.17 实测行为）")
+    ap.add_argument("--io-name-ext", action="store_true",
+                    help="取表名时回 `NAME=xxx.XML`、下载只认带 .XML 的名字（真机形状）")
+    ap.add_argument("--io-zip-nak", action="store_true",
+                    help="对 `*?INSTALLATION CURRENT ZIP` 回 NAK（复现真机，考客户端换写法）")
+    ap.add_argument("--io-idx0", action="store_true",
+                    help="按序号取名用 0 基（0~n-1，第 n 个 NAK；复现真机实测口径）")
     ap.add_argument("--io-block", type=int, default=1024, help="默认块大小")
     ap.add_argument("--io-dir", default=None,
                     help="收到的上传表另存一份到该目录（核对用）")
@@ -1179,6 +1213,8 @@ def main():
     globals()["DROP_ON_BAND"] = a.drop_on_band
     globals()["IO_ENABLED"] = not a.no_io
     IO_CFG.update({"crc": a.io_crc, "esc": a.io_esc, "no_tag": a.io_no_tag,
+                   "idx0": a.io_idx0, "zip_nak": a.io_zip_nak,
+                   "name_ext": a.io_name_ext,
                    "block": a.io_block, "dir": a.io_dir})
     # 锁定时间：分频段可调；--lock-time 作全局覆盖（旧参数兼容）
     if a.lock_time is not None:

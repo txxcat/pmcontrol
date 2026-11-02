@@ -210,18 +210,21 @@ class PlanSync(object):
     def _download_single(self, kind, name, dest):
         tag = F.TAGS[kind]
         last = None
-        for form in DOWNLOAD_FORMS:
-            try:
-                cmd = form.format(tag=tag, name=name, block=self.io.block)
-                return self._download_by_cmd(cmd, dest)
-            except (PromaxError, F.FileIOError) as e:
-                last = e
-                self.log("命令不认：%s（%s）" % (cmd, e))
+        # 表名写法（带不带 .XML）× 命令形状，都试一遍：设备回报的名字带扩展名，
+        # 命令里要不带 —— 谁也说不准，两个都发最省事（被拒只是一次 NAK，很快）
+        for cand in F.name_variants(name):
+            for form in DOWNLOAD_FORMS:
+                cmd = form.format(tag=tag, name=cand, block=self.io.block)
                 try:
-                    self.reconnect()          # 命令被拒后重新对齐时序
-                except PromaxError:
-                    raise
-        # 两种命令形状都被 NAK：分不清是"没这张表"还是"不认单表命令"
+                    return self._download_by_cmd(cmd, dest)
+                except (PromaxError, F.FileIOError) as e:
+                    last = e
+                    self.log("命令不认：%s（%s）" % (cmd, e))
+                    try:
+                        self.reconnect()          # 命令被拒后重新对齐时序
+                    except PromaxError:
+                        raise
+        # 所有写法都被 NAK：分不清是"没这张表"还是"不认单表命令"
         raise SyncError(
             "设备拒绝了「%s」的下载请求（NAK）。\n"
             "可能原因：① 表名不对（设备上的名字大小写敏感）；"
@@ -254,7 +257,9 @@ class PlanSync(object):
 
     def _download_from_zip(self, kind, name, dest):
         idx = self._ensure_zip()
-        arc = idx.get(kind, {}).get(name)
+        table = idx.get(kind, {})
+        # 表名带不带 .XML 都可能：整装包里的键是不带扩展名的
+        arc = table.get(name) or table.get(F.plain_name(name))
         if not arc:
             have = "、".join(sorted(idx.get(kind, {}))) or "（空）"
             raise SyncError("设备上没有这张表：%s\n设备现有：%s" % (name, have))

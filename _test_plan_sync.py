@@ -322,11 +322,104 @@ def case_d():
         shutil.rmtree(src, ignore_errors=True)
 
 
+# ================================================================ E 0 基序号
+def case_e():
+    print("\n== E 真机口径：按序号取名是 0 基（第 n 个回 NAK） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-idx0")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        # 背景：真机 真机 报 TER-CH=5，TER-CH=5 却 NAK、TER-CH=1 有名字。
+        # 旧实现写死 range(1, n+1)，第 n 个必 NAK → 整条列举报错 → GUI
+        # 显示"读取设备表清单失败"，再降级整装也失败（用户报的那两个弹窗）。
+        names = sync.device_plans("TER")
+        check("0 基固件也能把射频表列全",
+              sorted(names) == ["DEMO-Analog", "DEMO-Digital"], names)
+        check("走的是单表路线", sync.strategy == "single", sync.strategy)
+        sat = sync.device_plans("SAT")
+        check("0 基固件也能把卫星表列全",
+              sorted(sat) == ["DEMO-C-Band", "DEMO-Ku-Band"], sat)
+
+        out = os.path.join(src, "TER", "DL0.XML")
+        sync.download("TER", "DEMO-Digital", out, overwrite=True)
+        check("0 基下列出的名字能直接下载且逐字节一致",
+              filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Digital.XML"),
+                          shallow=False))
+        check("CRC 照样能反推", sync.io.crc_name == "crc8-0x07",
+              sync.io.crc_name)
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
+# ================================================================ F 整装换写法
+def case_f():
+    print("\n== F 整装首选写法被 NAK → 自动换写法（真机实况） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-no-tag", "--io-zip-nak")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        # 单表命令 NAK + 整装首选写法也 NAK —— 真机两个弹窗就是这两条都挂。
+        names = sync.device_plans("TER")
+        check("换写法后仍能列举",
+              sorted(names) == ["DEMO-Analog", "DEMO-Digital"], names)
+        check("记录下走的是整装路线", sync.strategy == "zip", sync.strategy)
+        out = os.path.join(src, "TER", "DL-F.XML")
+        sync.download("TER", "DEMO-Analog", out, overwrite=True)
+        check("换写法拿到的整装包能取出表且逐字节一致",
+              filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Analog.XML"),
+                          shallow=False))
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
+# ================================================================ G 表名带扩展名
+def case_g():
+    print("\n== G 真机形状：设备回报 NAME=xxx.XML，且只认带 .XML 的下载写法 ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-name-ext")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        names = sync.device_plans("TER")
+        # 设备回 NAME=DEMO-Analog.XML，本地"表名"一律不带扩展名
+        check("列举出来的名字不带 .XML（否则会存成 xxx.XML.XML）",
+              sorted(names) == ["DEMO-Analog", "DEMO-Digital"], names)
+        dest = E.plan_path(src, "TER", names[0]) if names else ""
+        check("落盘路径只有一层 .XML", dest.endswith(".XML")
+              and not dest.upper().endswith(".XML.XML"), dest)
+        out = os.path.join(src, "TER", "DL-G.XML")
+        got = sync.download("TER", "DEMO-Analog", out, overwrite=True)
+        check("只认带扩展名时，客户端会自动换写法下载",
+              os.path.isfile(got)
+              and filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Analog.XML"),
+                              shallow=False))
+        check("CRC 照样反推", sync.io.crc_name == "crc8-0x07", sync.io.crc_name)
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
 def main():
     case_a()
     case_b()
     case_c()
     case_d()
+    case_e()
+    case_f()
+    case_g()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
     if FAILS:
         print("失败项：")
