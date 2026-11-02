@@ -1168,6 +1168,9 @@ class _PickDialog(object):
             self.lb.bind("<Control-a>", self._select_all)
             self.lb.bind("<Control-A>", self._select_all)
             self.lb.bind("<<ListboxSelect>>", self._on_sel)
+            # 方向键/Home/End 换选时，Tk 在部分版本上不发 <<ListboxSelect>>，
+            # 补一条按键松开的兜底 —— 否则"已选 N 项"会一直停在旧数字。
+            self.lb.bind("<KeyRelease>", self._on_sel)
         # 键盘事件只送到**焦点控件**（Tk 的规则），所以开窗就把焦点给列表：
         # 否则 Ctrl+A / 方向键要先用鼠标点一下列表才生效。
         self.lb.focus_set()
