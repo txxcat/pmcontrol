@@ -47,6 +47,8 @@ from promax_gui_config import (CONFIG_NAME, band_settings, date6, date8,
                                default_out_dir, get_download_path, load_config,
                                log_path, match_preset, preset_filename,
                                preset_pause, presets, save_config)
+import promax_version as ver        # 版本号唯一来源（标题 / 关于页都从这里取）
+import promax_plan_backup as B      # 只为了在「关于」页显示备份目录
 from promax_plan_dump import load_plans, parse_plan_xml
 from promax_plan_write import (convert_result_file, default_promax_path,
                                write_promax_for_results)
@@ -1080,7 +1082,7 @@ class App(object):
         self.retesting = False          # 当前这轮是不是"只重测失败频道"
         self._retest_subset = {}        # {item.key: [(原始序号, point), ...]}
 
-        root.title("PROMAX 频道表批量测试")
+        root.title(ver.short_title())
         w = self.cfg.get("window", {})
         root.geometry("%dx%d" % (w.get("width", 1240), w.get("height", 780)))
         root.minsize(1000, 640)
@@ -1723,9 +1725,9 @@ class App(object):
         self.ip_box.configure(values=hist)
 
     def _open_settings(self):
-        """设置窗口：改配置 json"""
+        """设置窗口：改配置 json + 关于页（版本号 / 项目地址）"""
         win = tk.Toplevel(self.root)
-        win.title("设置")
+        win.title("设置 — %s" % ver.version_text())
         win.transient(self.root)
         win.grab_set()
         # 高度要给足：「基本」页有 IP/端口/窗口/暂停/导出/列裁剪/重连 +
@@ -2009,6 +2011,69 @@ class App(object):
         hsb3.grid(row=1, column=0, sticky="ew")
         raw.insert("1.0", json.dumps(self.cfg, ensure_ascii=False, indent=2))
 
+        # ---- 关于（版本号 / 更新日期 / 项目地址 / 运行环境）----
+        # 版本号只从 promax_version 取，这里不写任何字面量 ——
+        # 否则发版时总会漏掉一处（标题、关于页、README 各写一遍的老毛病）。
+        f4 = ttk.Frame(nb, padding=18)
+        nb.add(f4, text="关于")
+        ttk.Label(f4, text=ver.APP_NAME,
+                  font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
+        ttk.Label(f4, text="版本 %s      更新日期 %s"
+                  % (ver.version_text(), ver.RELEASE_DATE),
+                  font=("TkDefaultFont", 10)).pack(anchor="w", pady=(6, 2))
+        ttk.Label(f4, text="仪器远程测量 + 频道表管理，用于 PROMAX RANGERNeo 4 "
+                           "的频道表批量测试。",
+                  foreground=HINT).pack(anchor="w", pady=(0, 12))
+
+        info = ttk.Frame(f4)
+        info.pack(fill="x")
+        info.columnconfigure(1, weight=1)
+
+        def row(r, key, value, color=None, font=None):
+            ttk.Label(info, text=key + "：").grid(row=r, column=0, sticky="nw",
+                                                 pady=3)
+            lb = ttk.Label(info, text=value, foreground=color,
+                           font=font, wraplength=560, justify="left")
+            lb.grid(row=r, column=1, sticky="w", pady=3)
+            return lb
+
+        def link(r, key, text, url):
+            lb = row(r, key, text, color=theme.c("link"))
+            # 手型光标 + 下划线，让人一眼知道能点（ttk 没有内置超链接控件）
+            lb.configure(cursor="hand2",
+                         font=("TkDefaultFont", 9, "underline"))
+            lb.bind("<Button-1>", lambda e: self._open(url))
+            return lb
+
+        link(0, "GitHub 项目", ver.GITHUB_URL, ver.GITHUB_URL)
+        link(1, "最新发布", ver.RELEASES_URL, ver.RELEASES_URL)
+        link(2, "问题反馈", ver.ISSUES_URL, ver.ISSUES_URL)
+        row(3, "运行环境", ver.env_text())
+        row(4, "配置文件", CONFIG_NAME, color=HINT)
+        row(5, "频道表目录", os.path.abspath(self.source), color=HINT)
+        row(6, "备份目录", B.backup_dir(), color=HINT)
+        row(7, "许可", "%s License · © 2026 %s"
+            % (ver.LICENSE_NAME, ver.AUTHOR))
+
+        abtn = ttk.Frame(f4)
+        abtn.pack(fill="x", pady=(14, 0))
+        # 复制出来贴到 issue 里 —— 报 bug 时省掉"你什么系统/什么版本"这三轮来回
+        def copy_info():
+            txt = ver.about_text([("配置文件", CONFIG_NAME),
+                                  ("频道表目录", os.path.abspath(self.source))])
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt)
+            messagebox.showinfo("已复制", "版本信息已复制到剪贴板，可直接粘贴到问题反馈里。",
+                                parent=win)
+
+        ttk.Button(abtn, text="复制版本信息", command=copy_info).pack(side="left")
+        ttk.Button(abtn, text="打开发布页",
+                   command=lambda: self._open(ver.RELEASES_URL)
+                   ).pack(side="left", padx=6)
+        ttk.Label(abtn, text="（更新方式：到发布页下载新版 zip 覆盖即可，"
+                            "配置与频道表不受影响）",
+                  foreground=HINT).pack(side="left", padx=6)
+
         def do_save():
             try:
                 # 预设组
@@ -2166,7 +2231,7 @@ class App(object):
         self.retest_btn.configure(text="重测失败频道", state="disabled")
         self._timer_start()                          # 计时从这一刻起
         self.status.set("测试中...")
-        self.root.title("PROMAX 频道表批量测试 — 测试中")
+        self.root.title(ver.short_title() + " — 测试中")
 
         self.q = queue.Queue()
         try:
@@ -2255,7 +2320,7 @@ class App(object):
         self.retry_btn.configure(state="disabled")
         self.retest_btn.configure(state="disabled")
         self.status.set("重测中...")
-        self.root.title("PROMAX 频道表批量测试 — 重测失败频道")
+        self.root.title(ver.short_title() + " — 重测失败频道")
         self.q = queue.Queue()
         try:
             port = int(self.port_var.get())
@@ -2438,7 +2503,7 @@ class App(object):
             self._timer_pause()          # 等重连的时间也不计入用时
             self.retry_btn.configure(state="normal")
             self.status.set("网络中断，已暂停 — 等待重连")
-            self.root.title("PROMAX 频道表批量测试 — 已暂停（网络中断）")
+            self.root.title(ver.short_title() + " — 已暂停（网络中断）")
             self._log("")
             self._log("!! 与仪器的连接断开，测试已**暂停**（数据不丢）。")
             self._log("   点「重试连接」立即重试；默认也会定时自动重连；")
@@ -2448,7 +2513,7 @@ class App(object):
             self._timer_resume()         # 重连成功，继续计时
             n = self.engine.reconnects if self.engine else 0
             self.status.set(("测试中...（已重连 %d 次）" % n) if n else "测试中...")
-            self.root.title("PROMAX 频道表批量测试 — 测试中")
+            self.root.title(ver.short_title() + " — 测试中")
             self._log("   连接已恢复（累计重连 %d 次），继续测试。" % n)
         elif kind in (TestEngine.MSG_FINISH, TestEngine.MSG_STOPPED):
             pass    # 由 _poll 线程结束后统一收尾
@@ -2782,7 +2847,7 @@ class App(object):
             self._log("   点工具栏「重测失败频道」只补测这些频道，"
                       "结果合并进同一个文件（已成功的不重测）。")
         stopped = self.engine and self.engine._stop.is_set()
-        self.root.title("PROMAX 频道表批量测试")
+        self.root.title(ver.short_title())
         if self.rows:
             # 重测回来的行是"覆盖/追加"进去的 → 保存前按原始序号重排，
             # 保证结果表里的频道顺序与频道表一致（不会把补测的行堆到末尾）

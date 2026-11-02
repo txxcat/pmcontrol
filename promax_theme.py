@@ -39,6 +39,7 @@ LIGHT = {
     "idle_bg": "#ffffff",        # 白：排队中
     "hint": "#777777",           # 次要说明文字
     "danger": "#cc0000",         # 警示文字
+    "link": "#0a5bd3",           # 可点击的链接（关于页的项目地址）
     "switch_off": "#c9c9c9",     # 开关轨道：关
     "switch_on": "#34c759",      # 开关轨道：开
     "switch_knob": "#ffffff",    # 滑块
@@ -58,6 +59,7 @@ DARK = {
     "idle_bg": "#1f1f1f",        # 与列表底同色 → 排队行就是普通行
     "hint": "#a8a8a8",
     "danger": "#ff7a7a",         # 暗底上的红要提亮，纯 #c00 对比度不够
+    "link": "#6aa8ff",           # 暗底上的链接要提亮（#0a5bd3 几乎看不见）
     "switch_off": "#5a5a5a",
     "switch_on": "#30d158",
     "switch_knob": "#ffffff",

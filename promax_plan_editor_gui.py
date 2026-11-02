@@ -172,17 +172,21 @@ class PlanEditorWindow(tk.Toplevel):
                   foreground=DANGER).pack(side="left", padx=8)
 
         # ---- 设备同步 ----
+        # 下载/上传都可多选：选择框用 selectmode="extended"，就是 Windows
+        # 资源管理器那套规则（Ctrl 加选、Shift 选段）。
         sync = ttk.LabelFrame(right, text="与设备同步", padding=6)
         sync.pack(fill="x", pady=(10, 0))
         ttk.Button(sync, text="设备上的表…", command=self.show_device_plans
                    ).pack(side="left")
         ttk.Button(sync, text="从设备下载…", command=self.download_from_device
                    ).pack(side="left", padx=4)
-        ttk.Button(sync, text="上传当前表到设备", command=self.upload_current
+        ttk.Button(sync, text="上传到设备…", command=self.upload_plans
                    ).pack(side="left")
         self.sync_var = tk.StringVar(value="")
         ttk.Label(sync, textvariable=self.sync_var,
                   foreground=HINT).pack(side="left", padx=10)
+        ttk.Label(sync, text="下载/上传支持多选（Ctrl / Shift）",
+                  foreground=HINT).pack(side="left")
 
         # ---- 状态栏 ----
         self.status_var = tk.StringVar(value="就绪")
@@ -623,7 +627,7 @@ class PlanEditorWindow(tk.Toplevel):
         self._run_bg("读取设备表清单", job, done)
 
     def download_from_device(self):
-        """先取设备表清单 → 选一张 → 下载到对应文件夹（同名先问）"""
+        """先取设备表清单 → 选一张或多张 → 下载到对应文件夹（同名先问）"""
         def job(sync):
             out = {"plans": {}}
             for kind in E.KINDS:
@@ -638,12 +642,93 @@ class PlanEditorWindow(tk.Toplevel):
                 return messagebox.showinfo("下载", "设备上没有频道表", parent=self)
             dlg = _PickDialog(self, "选择要下载的频道表",
                               ["%s · %s" % (E.KIND_LABEL[k], n)
-                               for k, n in flat])
-            if dlg.index is None:
+                               for k, n in flat], multi=True,
+                              hint="Ctrl + 点击 加选 / 取消 · Shift + 点击 选一段 · "
+                                   "Ctrl + A 全选（与 Windows 一样）")
+            if not dlg.indices:
+                # 点了「确定」却没选任何一项 → 说一声；点「取消」就安静退出
+                if getattr(dlg, "confirmed", False):
+                    messagebox.showinfo("下载", "没有选中任何频道表", parent=self)
                 return
-            self._download_one(*flat[dlg.index])
+            picked = [flat[i] for i in dlg.indices]
+            # 只选一张 → 走原来的单张流程（保留"另存新名"这个更有用的选项）
+            if len(picked) == 1:
+                return self._download_one(*picked[0])
+            self._download_many(picked)
 
         self._run_bg("读取设备表清单", job, done)
+
+    def _download_many(self, picked):
+        """批量下载：同名表**一次问清**（是=全盖 / 否=跳过重名 / 取消=不下载）。
+
+        ⚠️ 不逐张弹框：设备上 20 张表里 18 张重名时，一个个点是/否会点到手软，
+           而且中途"取消"会让前面的已下载、后面的没下 —— 状态很难解释。
+        """
+        dup = [(k, n) for k, n in picked
+               if os.path.exists(E.plan_path(self.source, k, n))]
+        targets = list(picked)
+        if dup:
+            names = "\n".join("  · %s · %s" % (E.KIND_LABEL[k], n)
+                              for k, n in dup)
+            ans = messagebox.askyesnocancel(
+                "本地已有同名表",
+                "本地已存在 %d 张同名表：\n%s\n\n"
+                "是 = 全部覆盖（旧文件被替换，覆盖前会自动备份）\n"
+                "否 = 跳过这些，只下载新的\n"
+                "取消 = 都不下载" % (len(dup), names), parent=self)
+            if ans is None:
+                return
+            if not ans:
+                skip = set(dup)
+                targets = [t for t in picked if t not in skip]
+                if not targets:
+                    return messagebox.showinfo(
+                        "下载", "选中的表本地都已存在，跳过 → 没有要下载的",
+                        parent=self)
+        # 覆盖前先整份备份（和保存/删除保持同一套"动手前先打包"的规矩）
+        if any(os.path.exists(E.plan_path(self.source, k, n)) for k, n in targets):
+            try:
+                B.backup_plans(self.source, tag="pre-download", reason="覆盖下载前")
+            except OSError as e:
+                if not messagebox.askyesno(
+                        "备份失败",
+                        "下载前自动备份失败：\n%s\n\n仍然继续下载？" % e,
+                        parent=self):
+                    return
+
+        def job(sync):
+            ok, bad = [], []
+            for k, n in targets:
+                dest = E.plan_path(self.source, k, n)
+                try:
+                    ok.append((k, n, sync.download(k, n, dest, overwrite=True)))
+                except Exception as e:      # 单张失败不拖累其余
+                    bad.append((k, n, str(e)))
+            return {"ok": ok, "fail": bad}
+
+        def done(res):
+            ok, bad = res["ok"], res["fail"]
+            if ok:
+                k, n, _p = ok[-1]
+                self.refresh_lists(keep=(k, n))
+            self._notify()
+            lines = ["成功 %d 张，失败 %d 张" % (len(ok), len(bad))]
+            if ok:
+                lines.append("")
+                lines += ["  ✔ %s · %s" % (E.KIND_LABEL[k], n)
+                          for k, n, _ in ok]
+            if bad:
+                lines.append("")
+                lines += ["  ✘ %s · %s —— %s" % (E.KIND_LABEL[k], n, e)
+                          for k, n, e in bad]
+            self._say("已下载 %d 张（失败 %d）" % (len(ok), len(bad)))
+            if bad:
+                messagebox.showwarning("下载结果（部分失败）", "\n".join(lines),
+                                       parent=self)
+            else:
+                messagebox.showinfo("下载完成", "\n".join(lines), parent=self)
+
+        self._run_bg("下载 %d 张表" % len(targets), job, done)
 
     def _download_one(self, kind, name):
         dest = E.plan_path(self.source, kind, name)
@@ -681,23 +766,116 @@ class PlanEditorWindow(tk.Toplevel):
 
         self._run_bg("下载 %s" % name, job, done)
 
+    def _ensure_saved(self):
+        """上传前的"先落盘"检查：有改动就问一句，存不成就别传半成品上去。"""
+        if not (self.plan and self.plan.dirty):
+            return True
+        if not messagebox.askyesno("有未保存的改动", "先保存再上传吗？", parent=self):
+            return False
+        self.save_plan()
+        return self.plan is not None and not self.plan.dirty
+
     def upload_current(self):
+        """把**当前正在编辑**的那张表传到设备（工具栏/快捷键用）"""
         if not self.plan:
             return messagebox.showinfo("提示", "先选一张表", parent=self)
-        if self.plan.dirty:
-            if not messagebox.askyesno("有未保存的改动",
-                                       "先保存再上传吗？", parent=self):
-                return
-            self.save_plan()
-            if self.plan is None or self.plan.dirty:
-                return          # 保存失败/被取消 → 不传半成品上去
-        path = self.plan.path
-        kind, name = self.plan.kind, self.plan.name
+        if not self._ensure_saved():
+            return
+        self._upload_one(self.plan.kind, self.plan.name, self.plan.path)
 
+    def upload_plans(self):
+        """选一张或多张本地表上传（多选规则同 Windows：Ctrl 加选 / Shift 选段）"""
+        items = [(k, it["name"], it["path"])
+                 for k in E.KINDS for it in self.plans[k]]
+        if not items:
+            return messagebox.showinfo("上传", "本地没有频道表", parent=self)
+        pre = [i for i, (k, n, _p) in enumerate(items)
+               if self.plan and k == self.plan.kind and n == self.plan.name]
+        dlg = _PickDialog(self, "选择要上传到设备的频道表",
+                          ["%s · %s  (%d 个频点)"
+                           % (E.KIND_LABEL[k], n,
+                              next((it["count"] for it in self.plans[k]
+                                    if it["name"] == n), 0))
+                           for k, n, _p in items],
+                          multi=True, preselect=pre,
+                          hint="Ctrl + 点击 加选 / 取消 · Shift + 点击 选一段 · "
+                               "Ctrl + A 全选；默认选中当前打开的表")
+        picked = [items[i] for i in dlg.indices]
+        if not picked:
+            if getattr(dlg, "confirmed", False):
+                messagebox.showinfo("上传", "没有选中任何频道表", parent=self)
+            return
+        # 挑中了"当前打开且有改动"的表 → 先问保存（否则传上去的是旧内容）
+        if self.plan and self.plan.dirty and any(
+                k == self.plan.kind and n == self.plan.name for k, n, _ in picked):
+            if not self._ensure_saved():
+                return
+        if len(picked) == 1:
+            return self._upload_one(*picked[0])
+        self._upload_many(picked)
+
+    def _upload_many(self, picked):
+        """批量上传：先查一次同名，再**一次问清**覆盖策略。"""
+        def job(sync):
+            return {k: (sync.device_plans(k) or []) for k in E.KINDS}
+
+        def done(existing):
+            dup = [(k, n) for k, n, _ in picked if n in existing.get(k, [])]
+            targets = list(picked)
+            if dup:
+                names = "\n".join("  · %s · %s" % (E.KIND_LABEL[k], n)
+                                  for k, n in dup)
+                ans = messagebox.askyesnocancel(
+                    "设备上已有同名表",
+                    "设备上已存在 %d 张同名表：\n%s\n\n"
+                    "覆盖后在设备上**不可撤销**（设备没有回滚命令）。\n\n"
+                    "是 = 全部覆盖；否 = 跳过这些，只传新的；取消 = 都不传"
+                    % (len(dup), names), parent=self)
+                if ans is None:
+                    return
+                if not ans:
+                    skip = set(dup)
+                    targets = [t for t in picked if (t[0], t[1]) not in skip]
+                    if not targets:
+                        return messagebox.showinfo(
+                            "上传", "选中的表设备上都已有，跳过 → 没有要上传的",
+                            parent=self)
+
+            def job2(sync):
+                ok, bad = [], []
+                for k, n, p in targets:
+                    try:
+                        ok.append((k, sync.upload(p, kind=k, name=n)))
+                    except Exception as e:      # 单张失败不拖累其余
+                        bad.append((k, n, str(e)))
+                return {"ok": ok, "fail": bad}
+
+            def done2(res):
+                ok, bad = res["ok"], res["fail"]
+                lines = ["成功 %d 张，失败 %d 张" % (len(ok), len(bad))]
+                if ok:
+                    lines += [""] + ["  ✔ %s · %s" % (E.KIND_LABEL[k], n)
+                                     for k, n in ok]
+                if bad:
+                    lines += [""] + ["  ✘ %s · %s —— %s" % (E.KIND_LABEL[k], n, e)
+                                     for k, n, e in bad]
+                self._say("已上传 %d 张（失败 %d）" % (len(ok), len(bad)))
+                if bad:
+                    messagebox.showwarning("上传结果（部分失败）",
+                                           "\n".join(lines), parent=self)
+                else:
+                    messagebox.showinfo("上传完成", "\n".join(lines),
+                                        parent=self)
+
+            self._run_bg("上传 %d 张表" % len(targets), job2, done2)
+
+        self._run_bg("检查设备上的同名表", job, done)
+
+    def _upload_one(self, kind, name, path):
+        """单张上传：设备上已有同名时，默认**换个名字**（覆盖不可撤销）。"""
         def job(sync):
             # 🔴 上传前先看设备上有没有同名表（覆盖不可撤销）
-            existing = sync.device_plans(kind)
-            return {"existing": existing}
+            return {"existing": sync.device_plans(kind)}
 
         def done(res):
             existing = res["existing"]
@@ -938,38 +1116,88 @@ class _ChannelDialog(object):
 
 
 class _PickDialog(object):
-    """从列表里挑一项"""
+    """从列表里挑一项 / 多项。
 
-    def __init__(self, parent, title, items):
+    `multi=True` 时用 `selectmode="extended"` —— 这**就是 Windows 资源管理器
+    的多选规则**（Tk 的 extended 模式与 Win32 的 LBS_EXTENDEDSEL 一致）：
+      · 单击        = 只选这一项（原来的选择被清掉）
+      · Ctrl + 单击 = 加选 / 取消选这一项
+      · Shift + 单击= 从锚点连选一段
+      · Ctrl + A    = 全选（Tk 自己没绑，这里补上，否则"和 Windows 一样"不完整）
+    不用自己写鼠标状态机：手搓 Shift/Ctrl 判定的边界（拖拽、已选区域再 Shift、
+    翻转 Ctrl）最容易和系统习惯错开一格。
+
+    结果：`self.index` = 第一个选中项（单选调用方照旧读它），
+          `self.indices` = 全部选中项（升序，按列表位置）。
+    """
+
+    def __init__(self, parent, title, items, multi=False, preselect=None,
+                 hint=None):
         self.index = None
+        self.indices = []
+        self.confirmed = False      # 点了「确定」=True；「取消」=False（两者都可能是空选）
         win = tk.Toplevel(parent)
         self.win = win
+        self.items = list(items)
+        self.multi = bool(multi)
         win.title(title)
         win.transient(parent)
         win.grab_set()
-        win.geometry("460x420")
-        ttk.Label(win, text=title, padding=(12, 10, 12, 4)).pack(anchor="w")
+        win.geometry("480x440")
+        ttk.Label(win, text=title, padding=(12, 10, 12, 2)).pack(anchor="w")
+        # 多选时把规则写在对话框里，省得用户猜（这是最容易"不知道该按 Ctrl"的地方）
+        if self.multi:
+            ttk.Label(win, text=hint or "Ctrl + 点击 加选 / 取消 · "
+                                        "Shift + 点击 选一段 · Ctrl + A 全选",
+                      foreground=HINT, padding=(12, 0, 12, 6)).pack(anchor="w")
         box = ttk.Frame(win, padding=(12, 0))
         box.pack(fill="both", expand=True)
         self.lb = tk.Listbox(box, exportselection=False,
+                             selectmode="extended" if self.multi else "browse",
                              **theme.listbox_opts())
         self.lb.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(box, orient="vertical", command=self.lb.yview)
         sb.pack(side="right", fill="y")
         self.lb.configure(yscrollcommand=sb.set)
-        for s in items:
+        for s in self.items:
             self.lb.insert("end", s)
-        if items:
-            self.lb.selection_set(0)
+        for i in (preselect or ([0] if self.items and not self.multi else [])):
+            if 0 <= i < len(self.items):
+                self.lb.selection_set(i)
+        if self.multi:
+            self.lb.bind("<Control-a>", self._select_all)
+            self.lb.bind("<Control-A>", self._select_all)
+            self.lb.bind("<<ListboxSelect>>", self._on_sel)
+        # 键盘事件只送到**焦点控件**（Tk 的规则），所以开窗就把焦点给列表：
+        # 否则 Ctrl+A / 方向键要先用鼠标点一下列表才生效。
+        self.lb.focus_set()
         bf = ttk.Frame(win, padding=12)
         bf.pack(fill="x")
         ttk.Button(bf, text="确定", command=self.ok).pack(side="right")
         ttk.Button(bf, text="取消", command=win.destroy).pack(side="right", padx=6)
+        self.count_var = tk.StringVar(value="")
+        if self.multi:
+            ttk.Label(bf, textvariable=self.count_var,
+                      foreground=HINT).pack(side="left")
+            self._on_sel()
         self.lb.bind("<Double-1>", lambda e: self.ok())
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
         parent.wait_window(win)
+
+    def _select_all(self, _ev=None):
+        if not self.items:
+            return "break"
+        self.lb.selection_set(0, "end")
+        self._on_sel()
+        return "break"          # 别让 Ctrl+A 继续冒泡（有些平台会去选输入框）
+
+    def _on_sel(self, _ev=None):
+        n = len(self.lb.curselection())
+        self.count_var.set("已选 %d 项" % n if n else "还没选")
 
     def ok(self):
         cur = self.lb.curselection()
-        if cur:
-            self.index = cur[0]
+        self.indices = list(cur)
+        self.index = cur[0] if cur else None
+        self.confirmed = True
         self.win.destroy()

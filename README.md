@@ -6,10 +6,13 @@
 > **目标仪器**：RANGERNeo 4 — High class field strength meter and spectrum analyzer with 4K decoder
 > （固件 `*VER 31.17`，Telnet 端口 `2222`）
 
+**当前版本 v1.2.0（2026-11-02）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
+运行起来可在「设置 → 关于」里看到版本号、更新日期与项目地址。
+
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
-→ `pmcontrol-v1.1.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
+→ `pmcontrol-v1.2.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
 - 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
@@ -26,6 +29,10 @@
 **设置界面**
 
 ![设置界面](docs/screenshot-settings.png)
+
+**设置 → 关于（版本号 / 更新日期 / 项目地址 / 运行环境）**
+
+![关于页](docs/screenshot-about.png)
 
 ---
 
@@ -104,13 +111,28 @@ XML 手工改，改完还不知道仪器认不认。
 - **与设备同步**：`*?INSTALLATION` 命令族，走同一条 Telnet 通道
   - 下载：先按表名单表下载（快，只动一张）；固件不认就自动降级为**整装 ZIP**
     下载后从包里按 `CH/TER|SAT/` 取（结构最保真）
-  - 上传：只走单表。设备上已有同名表时**弹框问**，默认"换个名字传"（覆盖不可撤销）
+  - **下载、上传都可以多选**：选择框用 Tk 的 `extended` 模式 —— 这**就是 Windows
+    资源管理器那套规则**（单击=单选、`Ctrl+单击`=加选/取消、`Shift+单击`=选一段、
+    `Ctrl+A`=全选），不用另外学一套操作
+  - 多张时同名冲突**一次问清**：是=全部覆盖 / 否=跳过重名只处理新的 / 取消=都不动
+    （逐张弹框在有 20 张表时会点到手软，而且中途取消会留下"前面下了、后面没下"的半截状态）
+  - 单张上传时设备上已有同名表仍**弹框问**，默认"换个名字传"（覆盖不可撤销）
   - 分块传输的 **CRC 算法手册没写**，程序从下载到的第一块数据**反推**（6 种候选里命中即定案）；
     反推不出来就拒绝上传，不猜
   - ⚠️ 31.17 实测对带 `TER-CH=` 的命令回 NAK（和 `*TUNE PLAN=` 一样被砍了）。
     这种情况下能下载、**不能上传** —— 整装 ZIP 上传会整体替换仪器安装包，不自动做
 
 > 第一次接真机前，建议先跑一次 `_probe_io.py`（见下），把报告发回来再决定走哪条路。
+
+### 版本号与「关于」页
+
+- 版本号只写在 `promax_version.py` 一个地方（`VERSION` / `RELEASE_DATE` / `GITHUB_URL`），
+  主窗口标题、「设置 → 关于」页都从这里取 —— 不再"标题一处、文档一处"地漏改
+- **设置 → 关于** 里能看到：版本号、更新日期、GitHub 项目 / 发布页 / 问题反馈三个可点链接、
+  运行环境（Python / Tk / 系统 / 源码版或 exe）、配置文件与频道表目录、许可证
+- 「复制版本信息」一键把上面这些塞进剪贴板，提 issue 时直接粘贴，省掉"你什么系统、
+  什么版本"的三轮来回
+- 版本号规则（语义化）：只修 bug → 修订号 +1；加功能 → 次版本 +1；不兼容大改 → 主版本 +1
 
 ### 测试进度
 
@@ -264,6 +286,7 @@ python _test_promax.py            # Promax 格式导出 / 转换（结构、编�
 python _test_platform.py          # 跨平台打开文件（win/mac/linux）+ 文件名归属不被冲
 python _test_layout.py            # 右列宽度：随字体自适应 / 不裁剪 / 窄窗不被挤扁
 python _test_theme.py             # 深色模式配色对比度 / 滑动开关 / 设置窗布尔项落盘
+python _test_version.py           # 版本号格式/唯一来源 / 关于页 / 多选选择框（Ctrl+Shift+Ctrl+A）
 python _test_plan_edit.py         # 频道表编辑（未知字段保留/模拟+2.75/增删改）+ zip 备份还原 + 窗口
 python _test_plan_sync.py         # 与设备同步：单表路线 / 固件不认时降级整装 ZIP / CRC 反推 / 转义
 ```
@@ -312,6 +335,7 @@ CH/
 | `promax_plan_dump.py` | 频道表 XML 解析（离线） |
 | `promax_telnet_test.py` | Telnet 连接层与命令封装 |
 | `promax_gui_config.py` | 配置层（json + 滚动备份到 `bak/` + 原子写） |
+| `promax_version.py` | **版本号唯一来源**（版本 / 日期 / 仓库地址 / 运行环境） |
 | `promax_theme.py` | 深浅色色板 + 传统 tk 控件（Listbox/Text）配色 |
 | `promax_widgets.py` | 自绘控件（滑动开关 ToggleSwitch） |
 | `promax_plan_write.py` | 写 Promax 仪器格式 XML / 读结果文件（也可单独当命令行用） |
@@ -333,6 +357,7 @@ CH/
 | `_test_platform.py` | 跨平台测试（打开文件三分支 + 预设文件名不被自动命名冲掉） |
 | `_test_layout.py` | 右列布局测试（宽度随字体自适应 / 内容不被裁 / 窄窗不被挤扁 / pack 顺序） |
 | `_test_theme.py` | 深色模式配色测试（对比度 / 色板完整性）+ 滑动开关 + 设置窗布尔项落盘 |
+| `_test_version.py` | 版本号格式与唯一来源 / 「关于」页内容 / 多选选择框（extended 规则 + Ctrl+A + 预选） |
 | `_test_plan_edit.py` | 频道表编辑器测试（未知字段保留 / 模拟 +2.75 / 增删改 + zip 备份还原 + 窗口全链路） |
 | `_test_plan_sync.py` | 设备同步集成测试（单表 / 降级整装 / IAC 转义 / CRC 换算法，对着模拟器跑） |
 | `_probe_io.py` | **真机**协议探测脚本（只读；`--upload` 才写，读完即删） |

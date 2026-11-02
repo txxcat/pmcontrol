@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""生成 README 用的两张界面截图（**全部用演示数据**，不含真实 IP / 频道表 / 输出目录）。
+"""生成 README 用的界面截图（**全部用演示数据**，不含真实 IP / 频道表 / 输出目录）。
 
   docs/pmcontrol_main.png         主界面（已应用演示预设）
-  docs/screenshot-settings.png    设置界面
+  docs/screenshot-settings.png    设置界面（基本页）
+  docs/screenshot-about.png       设置界面（关于页：版本号 / 更新日期 / 项目地址）
+  docs/screenshot-progress.png    进度反馈（列表高亮 + 两条进度条）
 
 🔴 四道防线，缺一不可：
   1. monkeypatch load_config —— 界面会自己从磁盘读 config.json，
@@ -105,6 +107,15 @@ def demo_row(item, i):
             "tune_s": 0.12, "wait_s": 0.3, "total_s": 0.45}
 
 
+def _descend(w, out=None):
+    """递归列出所有子控件（找 Notebook 用）。"""
+    out = [] if out is None else out
+    for c in w.winfo_children():
+        out.append(c)
+        _descend(c, out)
+    return out
+
+
 def _collect_texts(w, acc):
     """递归收集控件上的文字（text / textvariable / Listbox 行）。"""
     for c in w.winfo_children():
@@ -142,14 +153,25 @@ def assert_no_local_user(root):
     ⚠️ 起因：`outdir_var` 默认走 `default_out_dir()` 从注册表读**真实下载文件夹**
     （形如 `D:\\<本机用户名>\\Downloads`），只把文件名框设成演示值是拦不住的。
     这种泄漏就是路径中间一段，人眼看图极易漏掉，所以交给断言把关。
+
+    ⚠️ 例外：**公开信息不算泄漏** —— 仓库地址（`https://github.com/...`）与
+    版权行里的作者 handle 本来就是公开的，而作者 handle 恰好等于本机用户名时，
+    这两类文字会被误判（踩过：加了「关于」页后截图直接被拦）。
+    所以先把这两类剔掉再查；**路径**里的用户名照样会被抓到。
     """
     import getpass
-    names = {n.lower() for n in (os.environ.get("USERNAME"),
-                                 getpass.getuser()) if n}
+    import re
+    # ⚠️ 还要算上**用户目录名**：登录名与用户文件夹名不一定相同（本机就差一个字母），
+    #    只查用户名时 `C:\Users\<用户文件夹>\AppData\...` 会整个漏过去（实测漏过）。
+    names = {n.lower() for n in (
+        os.environ.get("USERNAME"), getpass.getuser(),
+        os.path.basename(os.path.expanduser("~"))) if n}
     if not names:
         return
     hit = []
     for t in _collect_texts(root, []):
+        t = re.sub(r"https?://\S+", "", t)                 # 公开链接
+        t = re.sub(r"License · © \d{4} \S+", "", t)        # 版权行
         if any(n in t.lower() for n in names):
             hit.append(t)
     hit = sorted(set(hit))
@@ -202,7 +224,7 @@ def grab(win, rel, root):
     print("saved %s  %s  (bbox=%d,%d,%dx%d)" % (out, img.size, x, y, w, h))
 
 
-def main(which=("main", "settings", "progress")):
+def main(which=("main", "settings", "about", "progress")):
     """生成 README 用的界面截图。
 
     ⚠️ 必须放在 `if __name__ == "__main__"` 里执行：本模块的函数会被别的脚本
@@ -237,8 +259,12 @@ def main(which=("main", "settings", "progress")):
             assert_no_local_user(root)          # 防线 4
             grab(root, os.path.join("docs", "pmcontrol_main.png"), root)
 
-        # ---- 2) 设置界面 ----
-        if "settings" in which:
+        # ---- 2) 设置界面（含「关于」页）----
+        if "settings" in which or "about" in which:
+            # 「关于」页会把频道表目录印出来 —— 截图时指向中性演示路径，
+            # 否则会把本机临时目录（含用户名）截进图里
+            real_src = app.source
+            app.source = r"D:\Demo\pmcontrol\CH"
             app._open_settings()
             settle(root, 40)
 
@@ -250,7 +276,25 @@ def main(which=("main", "settings", "progress")):
                 root.destroy()
                 raise SystemExit("!! 没找到设置窗")
             assert_no_local_user(root)          # 防线 4
-            grab(win, os.path.join("docs", "screenshot-settings.png"), root)
+            if "settings" in which:
+                grab(win, os.path.join("docs",
+                                       "screenshot-settings.png"), root)
+            if "about" in which:
+                # 切到「关于」页再抓一张（版本号 / 更新日期 / 项目地址都在这页）
+                nbs = [w for w in _descend(win)
+                       if w.winfo_class() == "TNotebook"]
+                if not nbs:
+                    root.destroy()
+                    raise SystemExit("!! 设置窗里没找到标签页容器")
+                nb = nbs[0]
+                for t in nb.tabs():
+                    if str(nb.tab(t, "text")) == "关于":
+                        nb.select(t)
+                        break
+                settle(root, 20)
+                assert_no_local_user(root)      # 防线 4（关于页有路径文字）
+                grab(win, os.path.join("docs", "screenshot-about.png"), root)
+            app.source = real_src               # 还原（下面的步骤还要用它）
 
         # ---- 3) 「已选频道表」进度高亮 + 两条进度条（状态同框）----
         if "progress" in which:

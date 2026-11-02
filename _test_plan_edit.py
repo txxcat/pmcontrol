@@ -349,10 +349,24 @@ def part3():
 
     EG.messagebox = MB
 
-    # 选择框：直接选第 0 项（真对话框要 wait_window，测试里会永久阻塞）
+    # 选择框：直接选第 0 项（真对话框要 wait_window，测试里会永久阻塞）。
+    # `pick` 用来模拟"Ctrl 多选了几项"，多选用例改它。
     class PickStub(object):
-        def __init__(self, parent, title, items):
-            self.index = 0 if items else None
+        pick = [0]
+        seen = []
+
+        def __init__(self, parent, title, items, multi=False, preselect=None,
+                     hint=None):
+            self.multi = multi
+            self.hint = hint
+            PickStub.seen.append((title, multi, len(items)))
+            want = set(i for i in (preselect or []) if 0 <= i < len(items))
+            if multi:
+                want |= set(self.pick)
+            elif not want:
+                want = {0} if items else set()
+            self.indices = sorted(i for i in want if 0 <= i < len(items))
+            self.index = self.indices[0] if self.indices else None
             self.win = None
 
     EG._PickDialog = PickStub
@@ -505,8 +519,9 @@ def part3():
             return {"TER": 1, "SAT": 1, "name": "DEMO"}
 
         def device_plans(self, kind):
-            # 故意用**本地已存在**的名字，才能测到"同名 → 另存新名"那条路
-            return {"TER": ["DEMO-Digital"], "SAT": ["DEMO-C-Band"]}[kind]
+            # TER 故意用**本地已存在**的名字，才能测到"同名 → 另存新名"那条路；
+            # SAT 用一个设备上独有的新名字，多选用例才能测到"只下新的那张"
+            return {"TER": ["DEMO-Digital"], "SAT": ["DEV-SAT-NEW"]}[kind]
 
         def download(self, kind, name, dest=None, overwrite=True):
             dest = dest or E.plan_path(src, kind, name)
@@ -563,6 +578,57 @@ def part3():
         check("上传带上了频段",
               fake["s"].uploaded[0][1] in ("TER", "SAT"),
               fake["s"].uploaded[0][1])
+
+    # ---- 多选下载：同名时「否」= 跳过重名，只下新的 ----
+    PickStub.seen[:] = []
+    PickStub.pick = [0, 1]          # TER·DEMO-Digital（本地已有） + SAT·DEV-SAT-NEW
+    n_up = len(fake["s"].uploaded)
+    win.download_from_device()
+    for _ in range(80):
+        root.update()
+        if not win._busy:
+            break
+        root.after(30)
+    root.update()
+    check("下载框是多选模式", any(s[1] for s in PickStub.seen), PickStub.seen)
+    check("多选下载没报错", not MB.errors, MB.errors)
+    check("重名跳过时只下新的那张",
+          os.path.isfile(os.path.join(src, "SAT", "DEV-SAT-NEW.XML")),
+          os.listdir(os.path.join(src, "SAT")))
+    check("下载不会顺手上传", len(fake["s"].uploaded) == n_up)
+
+    # ---- 多选下载：同名时「是」= 全部覆盖 ----
+    MB.askyesnocancel = staticmethod(lambda *a, **k: True)
+    win.download_from_device()
+    for _ in range(80):
+        root.update()
+        if not win._busy:
+            break
+        root.after(30)
+    root.update()
+    check("全部覆盖路径没报错", not MB.errors, MB.errors)
+    check("覆盖下载的汇报里有「成功 2 张」",
+          any("成功 2 张" in str(a) for a in MB.asked), MB.asked[-2:])
+
+    # ---- 多选上传 ----
+    PickStub.seen[:] = []
+    win.upload_plans()
+    for _ in range(80):
+        root.update()
+        if not win._busy:
+            break
+        root.after(30)
+    root.update()
+    check("上传框是多选模式", any(s[1] for s in PickStub.seen), PickStub.seen)
+    check("默认选中当前打开的表（预选生效）",
+          bool([s for s in PickStub.seen if s[1]]), PickStub.seen)
+    check("多选一次传了 2 张", len(fake["s"].uploaded) - n_up == 2,
+          fake["s"].uploaded)
+    check("多选上传没报错", not MB.errors, MB.errors)
+
+    # 复位桩，别影响后面的用例
+    PickStub.pick = [0]
+    MB.askyesnocancel = staticmethod(lambda *a, **k: False)
 
     # ---- 关窗 ----
     win.plan.dirty = False

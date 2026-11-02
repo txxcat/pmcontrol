@@ -103,7 +103,8 @@ def test_palettes():
                 ("已完成(绿)行", pal["list_fg"], pal["done_bg"]),
                 ("日志正文/日志底", pal["text_fg"], pal["text_bg"]),
                 ("提示文字/列表底", pal["hint"], pal["list_bg"]),
-                ("警示文字/列表底", pal["danger"], pal["list_bg"])):
+                ("警示文字/列表底", pal["danger"], pal["list_bg"]),
+                ("链接文字/列表底", pal["link"], pal["list_bg"])):
             d = theme.contrast_diff(fg, bg)
             check("%s：%s 对比 %d" % (tag, what, d), d >= 60,
                   "%s / %s 亮度差只有 %d —— 看不见" % (fg, bg, d))
@@ -114,7 +115,7 @@ def test_palettes():
     for k in ("list_bg", "list_fg", "text_bg", "text_fg", "active_bg",
               "done_bg", "idle_bg", "hint", "danger", "switch_off",
               "switch_on", "switch_knob", "switch_edge", "select_bg",
-              "select_fg", "panel"):
+              "select_fg", "panel", "link"):
         check("两套色板都有 %s" % k, k in theme.LIGHT and k in theme.DARK)
     check("色板返回副本（改它不影响模块状态）",
           theme.palette() is not theme.LIGHT
