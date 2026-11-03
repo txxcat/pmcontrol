@@ -6,13 +6,13 @@
 > **目标仪器**：RANGERNeo 4 — High class field strength meter and spectrum analyzer with 4K decoder
 > （固件 `*VER 31.17`，Telnet 端口 `2222`）
 
-**当前版本 v1.2.1（2026-11-03）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
+**当前版本 v1.3.1（2026-11-03）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
 运行起来可在「设置 → 关于」里看到版本号、更新日期与项目地址。
 
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
-→ `pmcontrol-v1.2.1-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
+→ `pmcontrol-v1.3.1-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
 - 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
