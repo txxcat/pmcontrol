@@ -412,6 +412,68 @@ def case_g():
         shutil.rmtree(src, ignore_errors=True)
 
 
+# ================================================================ H 仪器不应答
+def case_h():
+    print("\n== H 连得上但一个字节不回（--io-silent，真机 2026-11-03 症状） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-silent")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        t0 = time.time()
+        try:
+            sync.device_plans("TER")
+            check("设备不应答时要报错", False, "居然正常返回了")
+        except S.F.PromaxSilent as e:
+            dt = time.time() - t0
+            msg = str(e)
+            check("报的是「仪器不应答」而不是「命令被拒」", True)
+            check("错误里点明三种原因与恢复办法",
+                  "会话" in msg and "重启" in msg, msg.splitlines()[0])
+            check("说明白依据（连上后零字节）", "一个字节" in msg)
+            # 关键：设备不应答时不该再去试整装四种写法（每试一次就重连一次，
+            # 单会话设备会被打得更懵 → 真机上就是这么彻底不响应的）
+            check("没有把整装四种写法全试一遍（%.1fs < 25s）" % dt,
+                  dt < 25, "%.1f 秒" % dt)
+        # 探测脚本走同一个判定：体检不过就不往下跑
+        io = S.F.PlanIO(sync.conn)
+        try:
+            io.check_alive(timeout=1.5)
+            check("check_alive 应当抛 PromaxSilent", False, "没抛")
+        except S.F.PromaxSilent as e:
+            check("check_alive 单独用也能判出不应答", "一个字节" in str(e))
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
+# ================================================================ I 一发出就断
+def case_i():
+    print("\n== I 连上立刻被断开（--io-reset，复现 WinError 10054） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-reset")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        t0 = time.time()
+        try:
+            sync.device_plans("TER")
+            check("连接被重置时要报错", False, "居然正常返回了")
+        except S.F.PromaxSilent as e:
+            dt = time.time() - t0
+            check("也归到「仪器不应答」一类（不是命令问题）", True)
+            check("错误里点出「连接被立刻重置」", "重置" in str(e), str(e)[-30:])
+            check("没有反复重连硬试（%.1fs < 20s）" % dt, dt < 20,
+                  "%.1f 秒" % dt)
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
 def main():
     case_a()
     case_b()
@@ -420,6 +482,8 @@ def main():
     case_e()
     case_f()
     case_g()
+    case_h()
+    case_i()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
     if FAILS:
         print("失败项：")

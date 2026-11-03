@@ -6,13 +6,13 @@
 > **目标仪器**：RANGERNeo 4 — High class field strength meter and spectrum analyzer with 4K decoder
 > （固件 `*VER 31.17`，Telnet 端口 `2222`）
 
-**当前版本 v1.2.0（2026-11-02）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
+**当前版本 v1.2.1（2026-11-03）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
 运行起来可在「设置 → 关于」里看到版本号、更新日期与项目地址。
 
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
-→ `pmcontrol-v1.2.0-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
+→ `pmcontrol-v1.2.1-win64.zip`（约 23 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
 - 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
@@ -431,6 +431,17 @@ CH/
 16. **同步的第一条命令最容易吃到"半死旧会话"**（连得上、发得出去、一个字节不回）
     `PlanIO.counts()` 失败时自己 `reconnect()`（SO_LINGER RST 释放旧会话）再试一次，
     少一次"读取设备表清单失败"。
+
+17. **"设备不应答"必须和"命令被拒"分开处理**（2026-11-03 真机实证）
+    那天仪器彻底不应答：`*VER` 直接 `WinError 10054`，`*?INSTALLATION CURRENT`
+    **零字节**，整装三条写法各自等到超时。旧代码把它当"命令写法不对"处理 ——
+    接着把 4 种整装写法逐个试，**每次失败还重连一次**，等于对着单会话设备
+    连打十几次，越打越不响应，用户看到的就是层层叠叠两个弹窗。
+    现在 `PlanIO.check_alive()` 先问一句"有人吗"（发一条状态查询，3 秒内
+    **任何字节**都算活着：心跳 XON、NAK、响应行都算），判出 `PromaxSilent`
+    就**立刻停**，不去试整装、不重连重试，只把三条处置办法说清楚：
+    等 30~60 秒 / 断开别的连接 / 断电重启仪器。
+    `_probe_io.py` 同样先做连接体检，不通就直接收工（报告只有一页，不再刷几十行超时）。
 
 ## 许可证
 

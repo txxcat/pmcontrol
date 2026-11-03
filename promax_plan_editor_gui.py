@@ -19,6 +19,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import promax_fileio as F
 import promax_plan_backup as B
 import promax_plan_edit as E
 import promax_theme as theme
@@ -598,6 +599,13 @@ class PlanEditorWindow(tk.Toplevel):
         self.sync_var.set("")
         done, self._bg_done_fn = self._bg_done_fn, None
         if err is not None:
+            # 「设备一个字节都不回」要单独说 —— 它不是"命令不对"，
+            # 用户能做的是等/拔网线/重启仪器，而不是换写法再试
+            if isinstance(err, F.PromaxSilent):
+                # 全文进对话框（已在 promax_fileio 里按短行排好，不会撑成一条长条）
+                self.status_var.set("%s失败：仪器没有应答" % title)
+                messagebox.showerror("仪器没有应答", str(err), parent=self)
+                return
             self.status_var.set("%s失败：%s" % (title, err))
             messagebox.showerror("%s失败" % title, str(err), parent=self)
             return

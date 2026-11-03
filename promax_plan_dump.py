@@ -16,13 +16,13 @@ PROMAX 频道表分析工具（离线）
 用法
 ----
   python promax_plan_dump.py "D:\\工作文档\\Promax\\Promax数据备份\\CH_20231225_old.tgz"
-  python promax_plan_dump.py <tgz> --plan TOPWAY            # 只看某张表
+  python promax_plan_dump.py <tgz> --plan DEMO-Digital            # 只看某张表
   python promax_plan_dump.py <tgz> --csv topway.csv          # 导出 CSV
   python promax_plan_dump.py <tgz> --all                    # 全部表都导出
 
 XML 结构（实测）
 ----------------
-<CHANNEL-SET band="TERRESTRIAL" name="TOPWAY" ...>
+<CHANNEL-SET band="TERRESTRIAL" name="DEMO-Digital" ...>
   <HEADER><TV system="PAL" standard="I"/><LNB>undefined</LNB></HEADER>
   <CHANNELS>
     <CHANNEL name="113.25-Z03" frequency="116.00" units="MHz">
@@ -427,7 +427,7 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="示例:\n"
                "  python promax_plan_dump.py backup.tgz\n"
-               "  python promax_plan_dump.py backup.tgz --plan TOPWAY --csv out.csv\n"
+               "  python promax_plan_dump.py backup.tgz --plan DEMO-Digital --csv out.csv\n"
                "  python promax_plan_dump.py backup.tgz --all\n")
     ap.add_argument("source", help="频道表备份 .tgz 或解压后的目录（含 CH/TER、CH/SAT）")
     ap.add_argument("--plan", help="只显示指定表（按表名或文件名子串匹配）")

@@ -502,7 +502,7 @@ def main():
                                 "（也可只给前缀 DEMO-C）")
     ap.add_argument("--from-xml", help="频道表备份 .tgz：直接按表内频点遍历，"
                                        "不依赖仪器 CH NEXT")
-    ap.add_argument("--xml-plan", help="配合 --from-xml：表名或文件名子串，如 TOPWAY")
+    ap.add_argument("--xml-plan", help="配合 --from-xml：表名或文件名子串，如 DEMO-Digital")
     ap.add_argument("--xml-max", type=int, default=0, help="--from-xml 时最多取多少频点")
     ap.add_argument("--allow-mismatch", action="store_true",
                     help="频段与目标不符时仍继续（默认中止，避免产出错误数据）")

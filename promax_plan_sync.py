@@ -134,6 +134,10 @@ class PlanSync(object):
                         self.strategy = "single"
                     return names
                 self._tag_ok = False
+            except F.PromaxSilent:
+                # 设备一个字节都不回：整装 ZIP 也一定同样失败，
+                # 而且每试一次就要重连一次，会把单会话设备打得更懵 → 直接上抛
+                raise
             except (PromaxError, F.FileIOError) as e:
                 self.log("按序号取名失败（%s），改用整装 ZIP 列举" % e)
                 self._tag_ok = False
@@ -150,6 +154,9 @@ class PlanSync(object):
         self.log("改用整装 ZIP 路线：正在下载当前安装包…")
         try:
             self.io.download_zip(zp)
+        except F.PromaxSilent:
+            # 设备不应答的原话最有用（含"怎么恢复"），别包进"整装也失败了"里
+            raise
         except (PromaxError, F.FileIOError) as e:
             raise SyncError("整装下载也失败了：%s\n（这台固件可能两种文件命令都改过，"
                             "请把 _probe_io.py 的输出发我）" % e)
@@ -202,6 +209,8 @@ class PlanSync(object):
                 self._tag_ok = True
                 self.strategy = "single"
                 return dest
+            except F.PromaxSilent:
+                raise                    # 设备不应答 → 整装也一样，别白试
             except (PromaxError, F.FileIOError) as e:
                 self.log("单表下载失败（%s），改用整装 ZIP" % e)
                 self._tag_ok = False

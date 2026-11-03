@@ -61,6 +61,7 @@ class Probe(object):
         self.link = None
         self.n = 0
         self.verdict = []          # [(项目, 结论)]
+        self.alive = None          # 连接体检结果（None = 还没测）
 
     # ------------------------------------------------------------ 报告
     def say(self, msg=""):
@@ -144,8 +145,55 @@ class Probe(object):
         return data
 
     # ------------------------------------------------------------ 各探测项
+    def listen(self, seconds):
+        """一个字都不发，纯听：正常仪器会持续发 XON/XOFF 心跳"""
+        import time
+        buf = bytearray()
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            try:
+                chunk = self.link._chunk(0.1)
+            except Exception:
+                break
+            if chunk:
+                buf.extend(chunk)
+        return bytes(buf)
+
+    def probe_alive(self):
+        """连接体检：先确认"仪器会说话"，再谈命令对不对。
+
+        为什么放第一步：2026-11-03 那次探测，*VER 直接 10054、
+        后面每条命令都是 0 字节 —— 不是命令写错，是仪器侧没人应答。
+        这种情况下后面几十条探测全是白等，报告也读不出信息量。
+        """
+        self.head("0. 连接体检（先看仪器答不答话）")
+        beats = self.listen(3.0)
+        self.say("  · 静听 3 秒：%d 字节 %s"
+                 % (len(beats), describe_ctrl(beats) if beats else "（一片死寂）"))
+
+        got = []
+        for cmd, title in (("*?INSTALLATION CURRENT", "alive-installation"),
+                           ("*VER", "alive-ver")):
+            d = self.raw(cmd, wait=3.0, title=title)
+            got.append(len(d))
+            if d:                      # 有字节就不用再问第二句
+                break
+
+        alive = bool(beats) or any(got)
+        self.alive = alive
+        self.verdict_add("仪器应答", alive,
+                         "心跳 %d 字节 / 命令回应 %d 字节"
+                         % (len(beats), sum(got)))
+        if not alive:
+            self.say("")
+            self.say("  仪器连得上，但一个字节都不回 —— 后面所有探测都会是白等，直接收工。")
+            self.say("")
+            for ln in F.SILENT_SHORT.splitlines():
+                self.say("  " + ln)
+        return alive
+
     def probe_ver(self):
-        self.head("0. 固件版本 *VER")
+        self.head("1. 固件版本 *VER")
         try:
             r = self.conn.command("*VER")
             self.say("响应：%r" % (r,))
@@ -157,14 +205,14 @@ class Probe(object):
             self.verdict_add("固件版本", False, str(e))
 
     def probe_installation(self):
-        self.head("1. 安装概况  *?INSTALLATION / *?INSTALLATION CURRENT")
+        self.head("2. 安装概况  *?INSTALLATION / *?INSTALLATION CURRENT")
         for cmd in ("*?INSTALLATION", "*?INSTALLATION CURRENT"):
             self.raw(cmd, wait=2.0, title=cmd.strip("*?").replace(" ", "_"))
             self.reconnect()
 
     def probe_counts(self):
         """用 PlanIO 的正式实现读一次表数（这是同步功能的入口）"""
-        self.head("2. 表数（PlanIO.counts）")
+        self.head("3. 表数（PlanIO.counts）")
         try:
             io = F.PlanIO(self.conn)
             info = io.counts()
@@ -185,7 +233,7 @@ class Probe(object):
         客户端以前写死 1 基，第 n 个必 NAK → 列举整条报错（用户看到的
         "读取设备表清单失败"）。所以这里 0~n+1 全扫，一次说清。
         """
-        self.head("3. 序号扫描 0~n+1（确定序号基准，逐条记原始字节）")
+        self.head("4. 序号扫描 0~n+1（确定序号基准，逐条记原始字节）")
         info = info or {}
         result = {"TER": [], "SAT": []}
         for kind, tag in (("TER", "TER-CH"), ("SAT", "SAT-CH")):
@@ -260,7 +308,7 @@ class Probe(object):
         return bytes(buf)
 
     def probe_download(self, kind="TER", names=None):
-        self.head("4. 单表下载  *?INSTALLATION CURRENT %s-CH=<名> BLOCK=1024" % kind)
+        self.head("5. 单表下载  *?INSTALLATION CURRENT %s-CH=<名> BLOCK=1024" % kind)
         names = [n for n in (names or []) if n]
         if not names:
             self.say("  （没有已知表名，跳过）")
@@ -303,7 +351,7 @@ class Probe(object):
         return None
 
     def probe_zip(self):
-        self.head("5. 整装下载  *?INSTALLATION CURRENT ZIP BLOCK=1024")
+        self.head("6. 整装下载  *?INSTALLATION CURRENT ZIP BLOCK=1024")
         dest = os.path.join(self.outdir, "installation.zip")
         try:
             io = F.PlanIO(self.conn, verbose=True)
@@ -328,7 +376,7 @@ class Probe(object):
 
     def probe_upload(self, kind="TER"):
         """上传一张自造的小表 → 回读比对 → 删掉。会写仪器，必须显式开启。"""
-        self.head("6. 单表上传（写仪器，读完即删）  *INSTALLATION PC FILE …")
+        self.head("7. 单表上传（写仪器，读完即删）  *INSTALLATION PC FILE …")
         if not self.crc_known:
             self.say("  （CRC 没反推出来，上传必失败，跳过）")
             self.verdict_add("单表上传", False, "CRC 未知，跳过")
@@ -392,6 +440,13 @@ class Probe(object):
             return
 
         try:
+            if not self.probe_alive():
+                # 仪器不应答时，后面每条命令都只是白等 3~20 秒，
+                # 报告会变成几十行"超时"，看不出重点 → 直接收工。
+                self.say("")
+                self.say("（这次不做后续探测，等仪器恢复后重跑一次）")
+                return
+            self.reconnect()
             self.probe_ver()
             self.probe_installation()
             self.reconnect()
@@ -436,7 +491,7 @@ class Probe(object):
 
     def collect_names(self):
         """通过整装 ZIP 或按序号两条路拿表名（拿不到就返回空）"""
-        self.head("2.5 收集表名（先试按序号，再试整装包）")
+        self.head("3.5 收集表名（先试按序号，再试整装包）")
         out = {"TER": [], "SAT": []}
         try:
             io = F.PlanIO(self.conn)
@@ -471,12 +526,19 @@ class Probe(object):
         for item, ok, detail in self.verdict:
             self.say("  [%s] %-22s %s" % ("可以" if ok else "不行", item, detail))
         self.say("")
-        self.say("怎么读这份报告：")
-        self.say("  · 「按序号取名」那行会写清序号基准（0 基 / 1 基）—— 客户端两种都支持")
-        self.say("  · 「单表下载 = 可以」→ 同步功能走主路（快，只动一张表）")
-        self.say("  · 「单表下载 = 不行」但「整装下载 = 可以」→ 自动降级到整装 ZIP")
-        self.say("  · 两个都不行 → 这台固件把文件命令关掉了，只能走 USB 导入导出")
-        self.say("  · 「CRC 算法」那一行决定**能不能往仪器上传**")
+        if self.alive is False:
+            # 仪器压根没答话：其余条目都没测，别让人误以为"命令不支持"
+            self.say("怎么处理：")
+            self.say("  · 这次仪器**一个字节都没回**，不是命令的问题，参数不用改")
+            self.say("  · 按上面 ①②③ 处理（等 30~60 秒 / 断开别的连接 / 断电重启仪器）")
+            self.say("  · 仪器恢复后（能看到遥控软件正常读数）再重跑一次本脚本")
+        else:
+            self.say("怎么读这份报告：")
+            self.say("  · 「按序号取名」那行会写清序号基准（0 基 / 1 基）—— 客户端两种都支持")
+            self.say("  · 「单表下载 = 可以」→ 同步功能走主路（快，只动一张表）")
+            self.say("  · 「单表下载 = 不行」但「整装下载 = 可以」→ 自动降级到整装 ZIP")
+            self.say("  · 两个都不行 → 这台固件把文件命令关掉了，只能走 USB 导入导出")
+            self.say("  · 「CRC 算法」那一行决定**能不能往仪器上传**")
         path = os.path.join(self.outdir, "report.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(self.lines) + "\n")

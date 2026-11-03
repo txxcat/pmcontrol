@@ -66,6 +66,50 @@ class FileIOError(PromaxError):
     """频道表文件传输错误（用户可见）"""
 
 
+SILENT_HINT = """仪器接受了 TCP 连接，但一个字节都不回。
+
+这不是命令写错了 —— 仪器这会儿没有"应答的人"。
+三种常见原因：
+
+  ① 仪器还挂着上一次的会话
+     （它只允许一个 telnet 会话）
+     → 等 30~60 秒再试，还不行就拔插一次网线
+
+  ② 另一台电脑／另一个软件正连着这台仪器
+     → 先关掉那边的连接
+
+  ③ 仪器的网络服务卡死（面板正常，后台不响应）
+     → 断电重启一次仪器，恢复后立刻可用
+
+判断依据：正常时仪器会持续发 XON/XOFF 心跳，
+每条命令也都有回应；这次连上后 %s 秒内
+一个字节都没收到%s。"""
+
+
+SILENT_SHORT = """仪器接受了连接，但一个字节都不回。
+
+① 仪器还挂着上一次的会话 → 等 30~60 秒再试，或拔插一次网线
+② 另一台电脑 / 某个软件正连着它 → 先断开那边
+③ 仪器的网络服务卡死 → 断电重启一次仪器
+
+（完整诊断已写进日志）"""
+
+
+class PromaxSilent(FileIOError):
+    """端口连得上、但设备一个字节都不回（≠ 命令被拒，也 ≠ 网络不通）
+
+    单独一类错误的用处：这种状态下**换命令写法、换整装 ZIP、重连重试都没有意义**，
+    越试越糟（单会话设备被高频重连打懵会一直不响应）。所以上层必须
+    立刻停下，把原因说清楚，而不是继续把 4 种命令形态试一遍。
+    """
+
+    def __init__(self, seconds=3.0, reset=False):
+        self.seconds = seconds
+        self.reset = reset
+        note = "（连接被立刻重置）" if reset else ""
+        FileIOError.__init__(self, SILENT_HINT % (int(seconds), note))
+
+
 # ---------------------------------------------------------------- CRC 候选
 def crc8_poly07(data, init=0x00):
     """CRC-8/ATM：poly=0x07, init=0x00（嵌入式最常见的写法之一）"""
@@ -187,6 +231,24 @@ class RawLink(object):
     def send(self, data):
         self._log("TX %d 字节 %r" % (len(data), data[:40]))
         self.conn._send_raw(data)
+
+    def wait_any(self, timeout=3.0):
+        """等**至少一个字节**（心跳、控制字节、正文都算）；返回 bool。
+
+        存在的理由：区分"设备在但拒绝/超时"与"设备根本不应答"。后者在这台
+        机器上表现为"连得上、发得出去、一个字节不回"，换命令写法、重连都没用，
+        只有等仪器自己缓过来。所以第一步先问一句"有人吗"。
+
+        ⚠️ 收到的字节留在 `_pend` 里，调用方接着正常解析就行。
+        """
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self._pend:
+                return True
+            b = self._chunk(0.05)
+            if b:
+                self._ingest(b)
+        return bool(self._pend)
 
     def _ingest(self, raw):
         """把收到的原始字节并入 _pend（esc 模式下解 IAC 转义）"""
@@ -328,6 +390,41 @@ class PlanIO(object):
             except Exception:
                 pass
 
+    # ------------------------------------------------------------ 体检
+    def check_alive(self, timeout=3.0):
+        """问一句"有人吗"：连得上但**一个字节都不回** → 抛 PromaxSilent。
+
+        两条命令都试（有的固件不认 `*?INSTALLATION CURRENT` 但至少会回 NAK），
+        只要**有任何字节**回来就算活着 —— 心跳 XON、NAK、响应行都算。
+        证据用完后把链路 drain 干净，别让"体检"的残包污染真正的命令。
+        """
+        self.link.drain(quiet=0.1)
+        for cmd in (b"*?INSTALLATION CURRENT", b"*VER"):
+            try:
+                self.link.send(cmd + CR_B)
+                if self.link.wait_any(timeout):
+                    self.link.drain(quiet=0.2)
+                    return True
+            except PromaxConnLost:
+                raise PromaxSilent(timeout, reset=True)
+        raise PromaxSilent(timeout)
+
+    def _raise_if_silent(self, err, timeout=3.0):
+        """失败之后再判一次：是"命令被拒/超时"，还是"设备根本不应答"。
+
+        两者的处置完全不同 —— 前者可以换命令写法、换整装 ZIP；
+        后者换什么都没用，只会让单会话设备更懵，必须立刻停下说清楚。
+        """
+        if isinstance(err, PromaxSilent):
+            raise err
+        try:
+            self.check_alive(timeout=timeout)
+        except PromaxSilent:
+            raise
+        except (PromaxConnLost, PromaxError, FileIOError, OSError):
+            raise PromaxSilent(timeout, reset=True)
+        return False
+
     # ------------------------------------------------------------ 列举
     def counts(self, attempts=2):
         """设备上有多少张表：返回 {"TER": n, "SAT": n, "name": 当前安装名}
@@ -341,6 +438,8 @@ class PlanIO(object):
         for i in range(max(1, attempts)):
             try:
                 return self._counts_once()
+            except PromaxSilent:
+                raise                     # 不应答时立刻重试毫无意义
             except (PromaxError, FileIOError) as e:
                 last = e
                 if i + 1 >= max(1, attempts):
@@ -348,11 +447,19 @@ class PlanIO(object):
                 self._log("读表数失败（%s），重连后再试一次" % e)
                 self.conn.reconnect()
                 self.link = RawLink(self.conn, verbose=self.verbose)
+        # 两次都不行：先分清"设备不应答"还是"命令被拒/超时"，
+        # 前者要让上层**别**再去试整装 ZIP（越试越糟）
+        if last is not None:
+            self._raise_if_silent(last)
         raise last
 
     def _counts_once(self):
         self.link.drain()
         self.link.send(b"*?INSTALLATION CURRENT" + CR_B)
+        # 先看有没有任何字节回来：没有就是"仪器不应答"，别在这条命令上
+        # 干等 4×5 秒（正常时第一个字节 50ms 内就到，等于不花时间）
+        if not self.link.wait_any(3.0):
+            raise PromaxSilent(3.0)
         line = self._read_resp_line(tries=4, timeout=5.0)
         kv = parse_kv(line)
         out = {"TER": 0, "SAT": 0, "name": kv.get("NAME", "")}
@@ -583,7 +690,7 @@ class PlanIO(object):
         attempts = [(ZIP_FORMS[0], self.block), (ZIP_FORMS[0], 512),
                     (ZIP_FORMS[1], self.block), (ZIP_FORMS[2], self.block)]
         tries, last = [], None
-        for form, block in attempts:
+        for i, (form, block) in enumerate(attempts):
             cmd = form.format(block=block)
             try:
                 self.link.drain(quiet=0.1)
@@ -595,6 +702,11 @@ class PlanIO(object):
                 last = e
                 tries.append("%s → %s" % (cmd, e))
                 self._log("整装命令不认：%s（%s）" % (cmd, e))
+                if i == 0:
+                    # 第一种写法就失败：先确认设备**还在答应**。
+                    # 设备不应答时后面三种写法必然一样失败，而每试一次
+                    # 都要重连一次 —— 单会话设备被这样连打会彻底不响应（真机踩过）。
+                    self._raise_if_silent(e)
                 # 失败后会话状态不可信（可能收了半个 SIZE 行）→ 重建
                 try:
                     self.conn.reconnect()
@@ -607,6 +719,8 @@ class PlanIO(object):
 
     def _download_zip_once(self, cmd, dest, block):
         self.link.send(cmd.encode("ascii") + CR_B)
+        if not self.link.wait_any(3.0):
+            raise PromaxSilent(3.0)      # 一个字节不回：不是命令写法的问题
         c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
         if c == NAK:
             raise FileIOError("设备拒绝整装下载（NAK）")

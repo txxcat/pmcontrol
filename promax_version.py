@@ -18,8 +18,8 @@ import sys
 
 APP_NAME = "PROMAX 频道表批量测试"     # 界面标题用的名字
 APP_ID = "pmcontrol"                    # 仓库 / 可执行文件名（小写无空格）
-VERSION = "1.2.0"
-RELEASE_DATE = "2026-11-02"             # 这一版定稿的日期（不是运行时时间）
+VERSION = "1.2.1"
+RELEASE_DATE = "2026-11-03"             # 这一版定稿的日期（不是运行时时间）
 
 GITHUB_URL = "https://github.com/txxcat/pmcontrol"
 RELEASES_URL = GITHUB_URL + "/releases/latest"

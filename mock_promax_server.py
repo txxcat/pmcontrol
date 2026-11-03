@@ -575,6 +575,7 @@ def dispatch(body, query):
 IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{表名: bytes}
 IO_CFG = {"crc": "crc8-0x07", "esc": False, "no_tag": False,
           "idx0": False, "zip_nak": False, "name_ext": False,
+          "silent": False, "reset": False,
           "block": 1024, "dir": None}
 IO_RECV = {"on": False}
 IO_ENABLED = True
@@ -1010,6 +1011,27 @@ def handle(conn, addr):
         OPEN_COUNT[0] -= 1
         return
     log("[%s] 连接建立" % addr[0])
+    # --io-reset：连上立刻断开（复现真机的 WinError 10054：TCP 通、命令一发出就 RST）
+    if IO_CFG["reset"]:
+        log("  [IO] 立刻断开（--io-reset）")
+        try:
+            conn.close()
+        except OSError:
+            pass
+        OPEN_COUNT[0] -= 1
+        return
+    # --io-silent：连上、收数据，但**一个字节都不回**（无心跳、无响应）
+    #   复现真机 2026-11-03 的症状：连得上、发得出去、一个字节不回
+    if IO_CFG["silent"]:
+        log("  [IO] 进入静默模式（--io-silent：只收不回）")
+        try:
+            while True:
+                if not conn.recv(4096):
+                    break
+        except OSError:
+            pass
+        OPEN_COUNT[0] -= 1
+        return
     stop = threading.Event()
 
     def heartbeat():
@@ -1195,6 +1217,10 @@ def main():
                     help="把数据里的 0xFF 按 telnet 转义成 0xFF 0xFF（考客户端解转义）")
     ap.add_argument("--io-no-tag", action="store_true",
                     help="`*?INSTALLATION CURRENT TER-CH=...` 一律 NAK（复现 31.17 实测行为）")
+    ap.add_argument("--io-silent", action="store_true",
+                    help="连上后只收不回（复现\"仪器不应答\"：连得上、发得出去、零字节回复）")
+    ap.add_argument("--io-reset", action="store_true",
+                    help="连上后立刻断开（复现真机的 WinError 10054）")
     ap.add_argument("--io-name-ext", action="store_true",
                     help="取表名时回 `NAME=xxx.XML`、下载只认带 .XML 的名字（真机形状）")
     ap.add_argument("--io-zip-nak", action="store_true",
@@ -1215,6 +1241,7 @@ def main():
     IO_CFG.update({"crc": a.io_crc, "esc": a.io_esc, "no_tag": a.io_no_tag,
                    "idx0": a.io_idx0, "zip_nak": a.io_zip_nak,
                    "name_ext": a.io_name_ext,
+                   "silent": a.io_silent, "reset": a.io_reset,
                    "block": a.io_block, "dir": a.io_dir})
     # 锁定时间：分频段可调；--lock-time 作全局覆盖（旧参数兼容）
     if a.lock_time is not None:

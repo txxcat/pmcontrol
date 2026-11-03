@@ -20,6 +20,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import promax_fileio as FIO                              # noqa: E402
 import promax_plan_edit as E                              # noqa: E402
 import promax_plan_backup as B                             # noqa: E402
 
@@ -545,6 +546,32 @@ def part3():
     check("设备清单读出来了",
           any("DEMO-Digital" in str(a) for a in MB.asked), MB.asked[-3:])
     check("同步会话被关掉了", fake["s"].closed)
+
+    # ---- 仪器一个字节都不回：弹框必须说"不是命令问题" ----
+    class SilentSync(FakeSync):
+        def device_plans(self, kind):
+            raise FIO.PromaxSilent(3.0)
+
+    saved_sync = fake["s"]
+    fake["s"] = SilentSync()
+    win.sync_factory = lambda: fake["s"]
+    MB.errors = []
+    win.show_device_plans()
+    for _ in range(60):
+        root.update()
+        if not win._busy:
+            break
+        root.after(30)
+    root.update()
+    titles = [str(a[0]) for a in MB.errors]
+    bodies = " ".join(str(a[1]) for a in MB.errors)
+    check("不应答时弹的是「仪器没有应答」", "仪器没有应答" in titles, titles)
+    check("正文说清不是命令问题", "不是命令写错了" in bodies, bodies[:60])
+    check("正文给出恢复办法", "重启" in bodies and "会话" in bodies)
+    check("状态栏不塞长文", len(win.status_var.get()) < 40,
+          win.status_var.get())
+    fake["s"] = saved_sync            # 后面的用例继续用原来的桩
+    MB.errors = []
 
     # 下载（同名 → 桩返回"否" → 另存新名）
     fake["s"].closed = False
