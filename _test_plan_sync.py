@@ -508,6 +508,45 @@ def case_j():
         shutil.rmtree(src, ignore_errors=True)
 
 
+def case_k():
+    print("\n== K CRC 是 sum-neg（--io-crc sum-neg，真机实测算法） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-idx0", "--io-name-ext", "--io-size-nocr",
+                "--io-crc", "sum-neg")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        out = os.path.join(src, "TER", "DL-K.XML")
+        got = sync.download("TER", "DEMO-Analog", out, overwrite=True)
+        check("下得下来", os.path.isfile(got), got)
+        check("内容与设备上的一致",
+              filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Analog.XML"),
+                          shallow=False))
+        # 反推必须在第 1 块就定下来，且是字节和取负而不是 crc8
+        check("CRC 反推为 sum-neg", sync.io.crc_name == "sum-neg",
+              str(sync.io.crc_name))
+
+        # 知道算法后上传应当解锁；改几个字节再传，回读一遍做闭环
+        data = bytearray(open(out, "rb").read())
+        data[-20:-10] = b"KEEPME1234"
+        alt = os.path.join(src, "TER", "UL-K.XML")
+        open(alt, "wb").write(bytes(data))
+        name = sync.upload(alt, kind="TER", name="UL-K")
+        check("上传成功（%s）" % name, name == "UL-K", str(name))
+        check("设备清单里出现了这张表", "UL-K" in sync.device_plans("TER"),
+              str(sync.device_plans("TER")))
+        back = os.path.join(src, "TER", "BACK-K.XML")
+        sync.download("TER", "UL-K.XML", back, overwrite=True)
+        check("回读内容与上传的一致",
+              open(alt, "rb").read() == open(back, "rb").read())
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
 def main():
     case_a()
     case_b()
@@ -519,6 +558,7 @@ def main():
     case_h()
     case_i()
     case_j()
+    case_k()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
     if FAILS:
         print("失败项：")

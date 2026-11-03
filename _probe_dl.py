@@ -46,14 +46,37 @@
 
 import argparse
 import os
+import re
 import socket
 import sys
 import time
 
 CR = b"\r"
+LF = 0x0A
 XON, XOFF, ACK, NAK = 0x11, 0x13, 0x06, 0x15
 CTRL_NAMES = {XON: "XON", XOFF: "XOFF", ACK: "ACK", NAK: "NAK", 0x0D: "CR", 0x0A: "LF"}
 TAGS = {"TER": "TER-CH", "SAT": "SAT-CH"}
+OUT_DIR = ""                     # main 里设置，full 模式落盘用
+
+
+def _crc8(data, poly):
+    c = 0
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ poly) & 0xFF if c & 0x80 else (c << 1) & 0xFF
+    return c
+
+
+CRCS = [
+    ("crc8-0x07", lambda d: _crc8(d, 0x07)),
+    ("crc8-0x31", lambda d: _crc8(d, 0x31)),
+    ("xor", lambda d: 0 if not d else
+     __import__("functools").reduce(lambda a, b: a ^ b, d)),
+    ("sum", lambda d: sum(d) & 0xFF),
+    ("sum-neg", lambda d: (-sum(d)) & 0xFF),
+    ("crc8-0x07-neg", lambda d: (-_crc8(d, 0x07)) & 0xFF),
+]
 
 
 # ----------------------------------------------------------------- 字节记录
@@ -174,6 +197,125 @@ def log_line(label, msg):
     print(("[%s] " % label if label else "") + msg)
 
 
+def _recv_some(s, wait):
+    """非阻塞收一片；没有就等 wait 秒返回 b"" """
+    end = time.time() + wait
+    while time.time() < end:
+        try:
+            d = s.recv(65536)
+        except BlockingIOError:
+            time.sleep(0.01)
+            continue
+        except OSError:
+            return b""
+        if d:
+            return d
+        time.sleep(0.01)
+    return b""
+
+
+def _skip_ctrl(s, buf, rec, timeout=10.0):
+    """等到缓冲区首字节**是数据**为止（跳掉 XON/XOFF/CR/LF/ACK/NAK）
+
+    ⚠️ 缓冲为空时必须先收一片再判断 —— 否则会直接把块前的 XOFF 当成数据首字节，
+    整块错位 1 字节、CRC 全不命中（这个坑冒烟时就踩了）。
+    """
+    t0 = time.time()
+    while True:
+        while buf and buf[0] in (XON, XOFF, CR[0], LF, ACK, NAK):
+            del buf[:1]
+        if buf:
+            return True
+        if time.time() - t0 > timeout:
+            return False
+        d = _recv_some(s, 0.2)
+        if d:
+            buf += d
+            rec.add(d)
+
+
+def _take(s, buf, rec, n, timeout):
+    """从缓冲区精确取 n 字节（块内不跳过任何字节 —— 数据里本来就有 0x11/0x13）"""
+    t0 = time.time()
+    while len(buf) < n:
+        d = _recv_some(s, 0.2)
+        if d:
+            buf += d
+            rec.add(d)
+        elif time.time() - t0 > timeout:
+            raise TimeoutError("要 %d 字节，只收到 %d 字节" % (n, len(buf)))
+    out = bytes(buf[:n])
+    del buf[:n]
+    return out
+
+
+def full_trial(ip, port, timeout, name, kind, block, log):
+    """按手册时序完整收一遍：SIZE → ACK → （块 + CRC）→ ACK → …
+
+    跟 ack 模式的区别：**每块都回 ACK**，一直到收满 SIZE。
+    ack 模式只回一次，所以只能看到第一块（真机 5 秒后就 NAK 中止）。
+    """
+    tag = TAGS[kind]
+    cmd = "*?INSTALLATION CURRENT %s=%s BLOCK=%d" % (tag, name, block)
+    s = connect(ip, port, timeout, log)
+    rec = Rec()
+    buf = bytearray()
+    try:
+        log("  发送：%s" % cmd)
+        s.sendall(cmd.encode("latin-1") + CR)
+
+        # 1) 读 SIZE 行（这台固件结尾是 XON、没有 CR）
+        t0 = time.time()
+        size = None
+        while time.time() - t0 < 10.0:
+            d = _recv_some(s, 0.2)
+            if d:
+                buf += d
+                rec.add(d)
+            m = re.search(rb"SIZE=(\d+)", bytes(buf))
+            if m:
+                size = int(m.group(1))
+                break
+        if not size:
+            return rec, "没拿到 SIZE 行（%d 字节）" % len(buf)
+        log("  SIZE=%d，块 %d，共 %d 块" % (size, block, (size + block - 1) // block))
+        # 清掉 SIZE 行残余（含 XON）
+        buf.clear()
+
+        # 2) 回 ACK，开始逐块收
+        s.sendall(bytes([ACK]))
+        got = bytearray()
+        idx = 0
+        algos = {}                      # 算法名 → 命中块数
+        t_start = time.time()
+        while len(got) < size:
+            want = min(block, size - len(got))
+            # 块前可能有 XOFF / 心跳
+            if not _skip_ctrl(s, buf, rec):
+                raise TimeoutError("第 %d 块前等不到数据" % (idx + 1))
+            chunk = _take(s, buf, rec, want, 20.0)
+            crc = _take(s, buf, rec, 1, 10.0)[0]
+            hit = [n for n, fn in CRCS if fn(chunk) == crc]
+            for n in hit:
+                algos[n] = algos.get(n, 0) + 1
+            idx += 1
+            log("  第 %d 块 %4d 字节  CRC=0x%02X  %s"
+                % (idx, len(chunk), crc,
+                   ("命中 " + "/".join(hit)) if hit else "**没有任何算法命中**"))
+            got.extend(chunk)
+            s.sendall(bytes([ACK]))
+
+        log("  收满 %d 字节，用时 %.2fs" % (len(got), time.time() - t_start))
+        if algos:
+            best = sorted(algos.items(), key=lambda kv: -kv[1])[0]
+            log("  CRC 算法：%s（%d/%d 块命中）" % (best[0], best[1], idx))
+            # 落一份对比用（不写频道表目录）
+            open(os.path.join(OUT_DIR, "full.bin"), "wb").write(bytes(got))
+        return rec, "完整收满 %d 字节（%d 块）" % (len(got), idx)
+    finally:
+        close(s)
+
+
 def ask_name(ip, port, timeout, kind, idx, log):
     """用序号取真实文件名（这条在真机上验过，0 基）"""
     s = connect(ip, port, timeout, log)
@@ -268,6 +410,8 @@ def main():
 
     out = a.out or ("probe-dl-" + time.strftime("%Y%m%d-%H%M%S"))
     os.makedirs(out, exist_ok=True)
+    global OUT_DIR
+    OUT_DIR = out
 
     lines = []
 
@@ -302,18 +446,24 @@ def main():
 
     # 2. 逐种尝试
     only = [x.strip() for x in a.only.split(",") if x.strip()]
-    plan = [("ack", a.block), ("quiet", a.block), ("ack2", a.block),
-            ("ack512", 512), ("order", a.block)]
+    plan = [("full", a.block), ("ack", a.block), ("quiet", a.block),
+            ("ack2", a.block), ("ack512", 512), ("order", a.block)]
     if only:
         plan = [p for p in plan if p[0] in only]
+    else:
+        plan = plan[:1]              # 默认只跑 full（其余要 --only 点名）
 
     results = []
     for mode, block in plan:
         log("")
         log("-- %s（BLOCK=%d）" % (mode, block))
         try:
-            rec, verdict = trial(a.ip, a.port, a.timeout, name, a.kind,
-                                 block, mode, log, wait_data=a.wait)
+            if mode == "full":
+                rec, verdict = full_trial(a.ip, a.port, a.timeout, name,
+                                          a.kind, block, log)
+            else:
+                rec, verdict = trial(a.ip, a.port, a.timeout, name, a.kind,
+                                     block, mode, log, wait_data=a.wait)
         except Exception as e:
             log("  !! 整轮失败：%s" % e)
             results.append((mode, block, "%s（异常 %s）" % ("没跑起来", e)))
@@ -337,10 +487,14 @@ def main():
     log("表名：%r" % name)
     for mode, block, verdict in results:
         log("  %-8s BLOCK=%-5d %s" % (mode, block, verdict))
-    good = [r for r in results if "数据流起来了" in r[2]]
+    good = [r for r in results if "完整收满" in r[2]]
+    soft = [r for r in results if "数据流起来了" in r[2]]
     log("")
     if good:
-        log("⇒ 有可用的握手法：%s。把 report 发回来，我按它改 promax_fileio。" % good[0][0])
+        log("⇒ 下载链路成立：每块收到后回 ACK 即可，CRC 算法已由实测定案。")
+        log("   这份报告里的 full.bin 就是设备上的原始表文件。")
+    elif soft:
+        log("⇒ 数据流起得来但收不满：把 report 发回来，看第几块断的。")
     else:
         log("⇒ 这几种握手法都拿不到数据。这台固件很可能只认整装 ZIP 或文件系统路线"
             "（SFTP / webControl），telnet 单表下载先别惦记了。")

@@ -83,6 +83,10 @@ class PlanSync(object):
         self.crc_ready = False
         self._zip_cache = None        # (path, {kind: {name: arcname}})
         self._tag_ok = None           # 单表命令是否可用（None=未知）
+        # 上次成功过的写法（"xml"/"plain" + 命令形状下标），下次直接用它，
+        # 免得每张表都先被 NAK 一遍
+        self._name_ok = None
+        self._form_ok = None
 
     # ------------------------------------------------------------ 连接
     def _sftp_available(self):
@@ -312,24 +316,41 @@ class PlanSync(object):
     def _download_single(self, kind, name, dest):
         tag = F.TAGS[kind]
         last = None
-        # 表名写法（带不带 .XML）× 命令形状，都试一遍：设备回报的名字带扩展名，
-        # 命令里要不带 —— 谁也说不准，两个都发最省事（被拒只是一次 NAK，很快）
-        for cand in F.name_variants(name):
-            for form in DOWNLOAD_FORMS:
+        # 表名写法（带不带 .XML）× 命令形状，按"上次成功的"排前面。
+        # 🔴 **被 NAK 不重连**：真机实测 NAK 的含义就是"这个名字/这条命令不对"
+        # （带 .XML 才认），不是时序错乱。以前每次 NAK 都 reconnect，
+        # 单会话设备被连打十几次 —— 现场表现是"仪器越来越不响应"。
+        cands = F.name_variants(name)
+        if self._name_ok:                      # "xml" / "plain"
+            hit = [c for c in cands
+                   if c.upper().endswith(".XML") == (self._name_ok == "xml")]
+            cands = hit + [c for c in cands if c not in hit]
+        forms = list(DOWNLOAD_FORMS)
+        if self._form_ok is not None and self._form_ok < len(forms):
+            f = forms.pop(self._form_ok)
+            forms.insert(0, f)
+
+        for cand in cands:
+            for form in forms:
                 cmd = form.format(tag=tag, name=cand, block=self.io.block)
                 try:
-                    return self._download_by_cmd(cmd, dest)
+                    got = self._download_by_cmd(cmd, dest)
+                except PromaxConnLost:
+                    raise                      # 断线得让上层挂起重连，不是换写法
+                except F.PromaxSilent:
+                    raise                      # 零字节 = 仪器不应答，换写法也一样
                 except (PromaxError, F.FileIOError) as e:
                     last = e
                     self.log("命令不认：%s（%s）" % (cmd, e))
-                    try:
-                        self.reconnect()          # 命令被拒后重新对齐时序
-                    except PromaxError:
-                        raise
+                    continue
+                self._name_ok = "xml" if cand.upper().endswith(".XML") else "plain"
+                self._form_ok = DOWNLOAD_FORMS.index(form)
+                return got
+
         # 所有写法都被 NAK：分不清是"没这张表"还是"不认单表命令"
         raise SyncError(
             "设备拒绝了「%s」的下载请求（NAK）。\n"
-            "可能原因：① 表名不对（设备上的名字大小写敏感）；"
+            "可能原因：① 表名不对（设备上的名字大小写敏感，通常要带 .XML）；"
             "② 这台固件不认单表文件命令。\n"
             "最后一条命令：%s\n设备原话：%s"
             % (name, DOWNLOAD_FORMS[-1].format(tag=tag, name=name,

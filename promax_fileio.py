@@ -884,11 +884,14 @@ def plain_name(name):
 def name_variants(name):
     """同一个表在命令里的几种可能写法（按顺序试）。
 
-    真机回报带扩展名、模拟器不带 —— 谁也说不准命令要哪种，两种都试最省事。
+    🔴 **带 `.XML` 优先**：真机实测（2026-11-03，probe-dl）只认 `TER-CH=<名>.XML`，
+    去掉扩展名直接 NAK；模拟器和部分老固件反过来。按真机口径排在前面，
+    成功的写法由调用方记住，后续不再重试。
     """
     n = (name or "").strip()
     out = []
-    for c in (n, plain_name(n), n if n.upper().endswith(".XML") else n + ".XML"):
+    order = (n if n.upper().endswith(".XML") else (n + ".XML"), n, plain_name(n))
+    for c in order:
         if c and c not in out:
             out.append(c)
     return out
