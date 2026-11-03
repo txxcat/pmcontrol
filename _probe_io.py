@@ -193,16 +193,21 @@ class Probe(object):
         return alive
 
     def probe_ver(self):
-        self.head("1. 固件版本 *VER")
-        try:
-            r = self.conn.command("*VER")
-            self.say("响应：%r" % (r,))
-            ok = bool(r.get("ack") or r.get("lines"))
-            self.verdict_add("固件版本", ok,
-                             str(r.get("lines") or r.get("status") or "")[:40])
-        except Exception as e:
-            self.say("  !! 失败：%s" % e)
-            self.verdict_add("固件版本", False, str(e))
+        self.head("1. 固件版本 *?VER")
+        # 手册（rcc v2.2 第 5 页）写的是 `*?VER`（带问号）。
+        # 2026-11-03 那台对 `*VER` 直接 NAK，对 `*?VER` 才回版本 —— 两种都试。
+        for cmd in ("*?VER", "*VER"):
+            try:
+                r = self.conn.command(cmd)
+                self.say("%s 响应：%r" % (cmd, r))
+                ok = bool(r.get("ack") or r.get("lines"))
+                if ok:
+                    self.verdict_add("固件版本", True,
+                                     "%s → %s" % (cmd, str(r.get("lines") or "")[:40]))
+                    return
+            except Exception as e:
+                self.say("  !! %s 失败：%s" % (cmd, e))
+        self.verdict_add("固件版本", False, "两种写法都没回版本行")
 
     def probe_installation(self):
         self.head("2. 安装概况  *?INSTALLATION / *?INSTALLATION CURRENT")

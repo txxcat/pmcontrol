@@ -575,7 +575,7 @@ def dispatch(body, query):
 IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{表名: bytes}
 IO_CFG = {"crc": "crc8-0x07", "esc": False, "no_tag": False,
           "idx0": False, "zip_nak": False, "name_ext": False,
-          "silent": False, "reset": False,
+          "silent": False, "reset": False, "size_nocr": False,
           "block": 1024, "dir": None}
 IO_RECV = {"on": False}
 IO_ENABLED = True
@@ -794,8 +794,12 @@ def fileio_respond(conn, query, body):
         block = _io_block(body)
         conn.sendall(bytes([XOFF, ACK]))
         time.sleep(0.05)
-        conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode() + bytes([CR, LF]))
-        conn.sendall(bytes([XON]))
+        if IO_CFG["size_nocr"]:
+            # 真机形状：SIZE 行结尾没有 CR，紧跟一个 XON
+            conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode() + bytes([XON]))
+        else:
+            conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode() + bytes([CR, LF]))
+            conn.sendall(bytes([XON]))
         if _io_recv_ctrl(conn, timeout=10.0) != ACK:
             log("  !! 客户端没 ACK SIZE，中止")
             return True
@@ -819,8 +823,11 @@ def fileio_respond(conn, query, body):
         block = _io_block(body)
         conn.sendall(bytes([XOFF, ACK]))
         time.sleep(0.05)
-        conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode()
-                     + bytes([CR, LF]) + bytes([XON]))
+        if IO_CFG["size_nocr"]:
+            conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode() + bytes([XON]))
+        else:
+            conn.sendall(("*INSTALLATION SIZE=%d" % len(data)).encode()
+                         + bytes([CR, LF]) + bytes([XON]))
         if _io_recv_ctrl(conn, timeout=10.0) != ACK:
             log("  !! 客户端没 ACK SIZE，中止整装")
             return True
@@ -1236,6 +1243,9 @@ def main():
                     help="对 `*?INSTALLATION CURRENT ZIP` 回 NAK（复现真机，考客户端换写法）")
     ap.add_argument("--io-idx0", action="store_true",
                     help="按序号取名用 0 基（0~n-1，第 n 个 NAK；复现真机实测口径）")
+    ap.add_argument("--io-size-nocr", action="store_true",
+                    help="SIZE 应答**不带 CR**，结尾只给 XON（复现 192.168.1.100 实测："
+                         "客户端若死等 CR，就会和等 ACK 的设备互等超时）")
     ap.add_argument("--io-block", type=int, default=1024, help="默认块大小")
     ap.add_argument("--io-dir", default=None,
                     help="收到的上传表另存一份到该目录（核对用）")
@@ -1251,6 +1261,7 @@ def main():
                    "idx0": a.io_idx0, "zip_nak": a.io_zip_nak,
                    "name_ext": a.io_name_ext,
                    "silent": a.io_silent, "reset": a.io_reset,
+                   "size_nocr": a.io_size_nocr,
                    "block": a.io_block, "dir": a.io_dir})
     # 锁定时间：分频段可调；--lock-time 作全局覆盖（旧参数兼容）
     if a.lock_time is not None:

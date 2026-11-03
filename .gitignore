@@ -70,6 +70,7 @@ desktop.ini
 # 例外：真机协议探测脚本**要**随仓库分发（给现场的人跑）
 !_probe_io.py
 !_probe_ports.py
+!_probe_dl.py
 
 # 厂商官方文档（PDF 已由 *.pdf 忽略，这里连提取出的文本/渲染图一起挡掉）
 _docs_promax/
@@ -77,3 +78,4 @@ _docs_promax/
 # 真机探测输出目录（含仪器上的真实频道表名与表内容）
 probe-*/
 probe-ports-*/
+probe-dl-*/

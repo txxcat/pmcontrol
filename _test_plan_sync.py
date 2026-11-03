@@ -474,6 +474,40 @@ def case_i():
         shutil.rmtree(src, ignore_errors=True)
 
 
+# ================================================================ J SIZE 行无 CR
+def case_j():
+    print("\n== J SIZE 应答不带 CR、结尾只给 XON（--io-size-nocr，"
+          "真机 2026-11-03 实测） ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-idx0", "--io-name-ext", "--io-size-nocr")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        out = os.path.join(src, "TER", "DL-J.XML")
+        t0 = time.time()
+        got = sync.download("TER", "DEMO-Analog", out, overwrite=True)
+        dt = time.time() - t0
+        # 死等 CR 的写法会卡满 read_line 的 6×8 秒，这里必须快得多
+        check("SIZE 行没有 CR 也能下完（%.1fs）" % dt, os.path.isfile(got) and dt < 12,
+              "%.1f 秒" % dt)
+        check("内容与设备上的一致",
+              filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Analog.XML"),
+                          shallow=False))
+        check("CRC 照样反推", sync.io.crc_name == "crc8-0x07", sync.io.crc_name)
+
+        # 整装下载读的是同一个 SIZE 行，一起验
+        zp = os.path.join(src, "INST-J.zip")
+        sync.download_installation(zp)
+        check("整装下载也吃得下没有 CR 的 SIZE 行",
+              os.path.isfile(zp) and os.path.getsize(zp) > 100, zp)
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
 def main():
     case_a()
     case_b()
@@ -484,6 +518,7 @@ def main():
     case_g()
     case_h()
     case_i()
+    case_j()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
     if FAILS:
         print("失败项：")

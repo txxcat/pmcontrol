@@ -39,10 +39,11 @@
     with PromaxTelnet(ip, 2222) as c:
         io = PlanIO(c)
         print(io.list_plans("TER"))              # 设备上有哪些表
-        io.download("TER", "TW-Daily", "CH/TER/TW-Daily.XML")
-        io.upload("CH/TER/TW-Daily.XML")
+        io.download("TER", "DEMO-Daily", "CH/TER/DEMO-Daily.XML")
+        io.upload("CH/TER/DEMO-Daily.XML")
 """
 import os
+import re
 import select
 import time
 import zipfile
@@ -334,6 +335,22 @@ class RawLink(object):
         raise FileIOError("等控制字节超时（想要 %s）"
                           % ([hex(x) for x in wanted],))
 
+    def peek(self):
+        """看一眼缓冲区（不消费）"""
+        return bytes(self._pend)
+
+    def drop(self, n):
+        """丢掉缓冲区前 n 字节"""
+        del self._pend[:n]
+
+    def fill(self, wait=0.05):
+        """再收一点进缓冲区；收到东西返回 True"""
+        chunk = self._chunk(wait)
+        if chunk:
+            self._ingest(chunk)
+            return True
+        return False
+
     def read_line(self, timeout=8.0):
         """读一行（到 CR/LF 为止），返回 str
 
@@ -404,7 +421,9 @@ class PlanIO(object):
         证据用完后把链路 drain 干净，别让"体检"的残包污染真正的命令。
         """
         self.link.drain(quiet=0.1)
-        for cmd in (b"*?INSTALLATION CURRENT", b"*VER"):
+        # 手册（rcc v2.2 第 5 页）：版本查询是 `*?VER`（查询要带 ?）。
+        # 实测 192.168.1.100 对 `*VER` 回 NAK、对 `*?VER` 才回版本行。
+        for cmd in (b"*?VER", b"*?INSTALLATION CURRENT", b"*VER"):
             try:
                 self.link.send(cmd + CR_B)
                 if self.link.wait_any(timeout):
@@ -569,13 +588,13 @@ class PlanIO(object):
 
         c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
         if c == NAK:
-            # 分不清"没这张表"和"不认这条命令"（31.17 对带 TER-CH= 的一律 NAK），
-            # 两种可能都写出来，让上层/用户自己判断
+            # 分不清"没这张表"和"不认这条命令"，两种可能都写出来，
+            # 让上层/用户自己判断。实测这台固件**必须**带 .XML 原名。
             raise FileIOError(
-                "设备 NAK：%s-CH=%s 下载被拒（可能没这张表，"
-                "也可能这台固件不认单表文件命令）" % (kind, name))
+                "设备 NAK：%s=%s 下载被拒（表名要跟设备回报的一字不差，"
+                "通常带 .XML；也可能是这台固件不认单表文件命令）" % (tag, name))
 
-        line = self._read_resp_line()
+        line = self._read_size_line()
         kv = parse_kv(line)
         try:
             size = int(kv.get("SIZE", "0"))
@@ -749,7 +768,7 @@ class PlanIO(object):
         c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
         if c == NAK:
             raise FileIOError("设备拒绝整装下载（NAK）")
-        line = self._read_resp_line()
+        line = self._read_size_line()
         size = int(parse_kv(line).get("SIZE", "0") or 0)
         if size <= 0 or size > MAX_FILE:
             raise FileIOError("整装包大小不合理：%r" % line)
@@ -762,6 +781,48 @@ class PlanIO(object):
         return dest, len(data)
 
     # ------------------------------------------------------------ 杂项
+    def _read_size_line(self, timeout=10.0):
+        """读 `*INSTALLATION SIZE=n` 这行 —— **不能等 CR**
+
+        🔴 实测 192.168.1.100（probe-20261103-141007/raw-03-dl-fallback.bin）：
+
+            13 06 2A ... 53 49 5A 45 3D 35 32 33 36 11
+            XOFF ACK *INSTALLATION SIZE=5236          XON
+
+        结尾是 XON，**没有 CR**（同一台设备的 `NAME=` 应答是有 CR 的）。
+        而 `read_line()` 必须等 CR/LF 才收工 → 白等到超时；设备那头正等着
+        我们回 ACK —— 两边互等，数据阶段一个字节都收不到，
+        报出来就是「要 1024 字节，只收到 30 字节」。
+        整装下载读的是同一行，一起中招。
+
+        所以这里改成：只要看到 `SIZE=<数字>` 就算这行读完，剩下的控制字节
+        （末尾那个 XON）留着给 `_recv_blocks` 的 skip_ctrl 处理。
+        带 CR 的固件照样能读 —— 匹配到数字就停，CR 归后面的 skip_ctrl。
+        """
+        pat = re.compile(r"SIZE\s*=\s*(\d+)", re.I)
+        t0 = time.time()
+        while True:
+            raw = self.link.peek()
+            i = raw.find(b"*")
+            if i >= 0:
+                try:
+                    txt = raw[i:].decode("latin-1")
+                except Exception:
+                    txt = ""
+                m = pat.search(txt)
+                if m:
+                    end = i + m.end()
+                    line = raw[i:end].decode("latin-1", "replace")
+                    self.link.drop(end)
+                    if b"\r" not in raw[i:end]:
+                        self._log("SIZE 行结尾无 CR（按 XON 收尾），已按数字截取")
+                    return line
+            if time.time() - t0 > timeout:
+                raise FileIOError(
+                    "等 SIZE 行超时（%.0f 秒内没收到 SIZE=<数字>；缓冲区剩 %r）"
+                    % (timeout, self.link.peek()[:80]))
+            self.link.fill(0.05)
+
     def _read_resp_line(self, tries=6, timeout=8.0):
         """读一条响应行；收到的若不是 `*XXX` 开头就继续读（跳过回显/心跳）
 
