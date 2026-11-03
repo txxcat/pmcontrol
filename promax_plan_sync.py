@@ -347,10 +347,10 @@ class PlanSync(object):
                 self._form_ok = DOWNLOAD_FORMS.index(form)
                 return got
 
-        # 所有写法都被 NAK：分不清是"没这张表"还是"不认单表命令"
+        # 所有写法都没成：别写死"NAK"—— 实际原因可能是没拿到 SIZE、CRC 不符等
         raise SyncError(
-            "设备拒绝了「%s」的下载请求（NAK）。\n"
-            "可能原因：① 表名不对（设备上的名字大小写敏感，通常要带 .XML）；"
+            "下载「%s」失败：表名写法 × 命令形态都试过了。\n"
+            "常见原因：① 表名要跟设备列出来的一字不差（大小写敏感，可能带 .XML）；"
             "② 这台固件不认单表文件命令。\n"
             "最后一条命令：%s\n设备原话：%s"
             % (name, DOWNLOAD_FORMS[-1].format(tag=tag, name=name,
@@ -365,8 +365,18 @@ class PlanSync(object):
         c = io.link.wait_ctrl((F.ACK, F.NAK), timeout=10.0)
         if c == F.NAK:
             raise F.FileIOError("设备 NAK")
-        line = io._read_resp_line()
-        size = int(F.parse_kv(line).get("SIZE", "0") or 0)
+        # 🔴 这里必须用 _read_size_line，**不能**用 _read_resp_line：
+        # 后者要等 CR 才收工，而这台仪器的 SIZE 应答结尾是 XON、没有 CR
+        # → 白等 8 秒，设备那头 5 秒等不到 ACK 就 NAK 中止，数据一个字节都收不到。
+        line = io._read_size_line()
+        kv = F.parse_kv(line)
+        if "SIZE" not in kv:
+            up = line.upper()
+            if "NUMBER=" in up:
+                raise F.FileIOError(
+                    "这条命令被设备当成普通查询了（回了 %r）—— 写法不对" % line)
+            raise F.FileIOError("没拿到 SIZE（设备回的是 %r）" % line)
+        size = int(kv.get("SIZE", "0") or 0)
         if size <= 0 or size > F.MAX_FILE:
             raise F.FileIOError("SIZE 不合理：%r" % line)
         io.link.send(F.ACK_B)
@@ -434,7 +444,10 @@ class PlanSync(object):
         """
         self.connect()
         kind = kind or E.kind_of_path(path)
-        name = (name or os.path.splitext(os.path.basename(path))[0]).strip()
+        # 🔴 **不要在这里剥掉 .XML**：设备只认带扩展名的频道表
+        #    （真机实测：传不带扩展名的名字，设备会原样存成一个普通文件，
+        #      表清单里根本不认它）。补扩展名的规则交给传输层统一决定。
+        name = (name or os.path.basename(path)).strip()
         if self.mode == "sftp":
             self.strategy = "sftp"
             try:
@@ -449,13 +462,33 @@ class PlanSync(object):
                 "整装 ZIP 上传会整体替换设备安装包，暂不自动执行。\n"
                 "建议改用 SFTP（设置里把传输方式改成 SFTP）。")
         self.calibrate_crc()
+        # 上传前先记下设备上有什么 —— 上传后靠差集报出**设备实际存的名字**
+        before = set()
+        try:
+            before = set(self.device_plans(kind))
+        except (PromaxError, F.FileIOError):
+            pass
         try:
             got = self.io.upload(path, kind=kind, name=name)
-            self._tag_ok = True
-            self.strategy = "single"
-            return got
         except (PromaxError, F.FileIOError) as e:
             raise SyncError("上传失败：%s" % e)
+        # 🔴 设备遇到重名**不会覆盖**，而是自动改名（真机实测：传 DEMO-X →
+        #    仪器里出现的是 DEMO-X_2）。所以要回读一遍清单，把设备上的
+        #    真名告诉用户，别让他以为覆盖成功了。
+        try:
+            after = set(self.device_plans(kind))
+            added = sorted(after - before)
+        except (PromaxError, F.FileIOError):
+            added = []
+        if added:
+            real = added[0]
+            if not real.upper().endswith(".XML"):
+                real += ".XML"
+            self.log("设备上实际存为：%s" % real)
+            got = real
+        self._tag_ok = True
+        self.strategy = "single"
+        return got
 
     def remove(self, kind, name):
         """删设备上的一张表（不可撤销 —— 调用方必须先确认）"""

@@ -836,8 +836,10 @@ class PlanEditorWindow(tk.Toplevel):
                 ans = messagebox.askyesnocancel(
                     "设备上已有同名表",
                     "设备上已存在 %d 张同名表：\n%s\n\n"
-                    "覆盖后在设备上**不可撤销**（设备没有回滚命令）。\n\n"
-                    "是 = 全部覆盖；否 = 跳过这些，只传新的；取消 = 都不传"
+                    "⚠️ 设备**不会覆盖**同名文件 —— 重复上传会被自动改名\n"
+                    "（传「表A」会存成「表A_2」），原来那几张保持不变。\n\n"
+                    "是 = 全部按同名上传（设备自动改名）；否 = 跳过这些，只传新的；"
+                    "取消 = 都不传"
                     % (len(dup), names), parent=self)
                 if ans is None:
                     return
@@ -880,9 +882,13 @@ class PlanEditorWindow(tk.Toplevel):
         self._run_bg("检查设备上的同名表", job, done)
 
     def _upload_one(self, kind, name, path):
-        """单张上传：设备上已有同名时，默认**换个名字**（覆盖不可撤销）。"""
+        """单张上传：设备上已有同名时，默认**换个名字**。
+
+        🔴 设备**不会覆盖**同名文件，重复上传会自动改名（真机实测：
+           传「表A」→ 仪器里出现「表A_2」）。所以这里只提示、不擅自删除。
+        """
         def job(sync):
-            # 🔴 上传前先看设备上有没有同名表（覆盖不可撤销）
+            # 🔴 上传前先看设备上有没有同名表
             return {"existing": sync.device_plans(kind)}
 
         def done(res):
@@ -891,9 +897,11 @@ class PlanEditorWindow(tk.Toplevel):
             if name in existing:
                 ans = messagebox.askyesnocancel(
                     "设备上已有同名表",
-                    "设备上已存在「%s」，覆盖后不可撤销（设备没有回滚命令）。\n\n"
-                    "是 = 换个名字上传（推荐）；否 = 覆盖设备上的那张；"
-                    "取消 = 不上传" % name, parent=self)
+                    "设备上已存在「%s」。\n\n"
+                    "⚠️ 设备**不会覆盖**同名文件 —— 重复上传会被自动改名\n"
+                    "（传「%s」会存成「%s_2」），原来那张保持不变。\n\n"
+                    "是 = 换个名字上传（推荐）；否 = 用同名上传（设备自动改名）；"
+                    "取消 = 不上传" % (name, name, name), parent=self)
                 if ans is None:
                     return
                 if ans:

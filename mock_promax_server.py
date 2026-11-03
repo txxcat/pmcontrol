@@ -572,7 +572,9 @@ def dispatch(body, query):
 #       --io-crc sum       换一种 CRC 算法（考客户端能不能反推出来）
 #       --io-esc           把数据里的 0xFF 按 telnet 转义成 0xFF 0xFF（考解转义）
 #       --io-no-tag        `*?INSTALLATION CURRENT TER-CH=1` 一律 NAK（复现 31.17）
-IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{表名: bytes}
+IO_FILES = {"TER": {}, "SAT": {}}      # 设备侧"频道表"：{表名(不带扩展名): bytes}
+IO_STORE = {"TER": {}, "SAT": {}}      # 设备侧"文件系统"：{字面文件名: bytes}
+                                            # 只有 .XML 的才算频道表
 IO_CFG = {"crc": "crc8-0x07", "esc": False, "no_tag": False,
           "idx0": False, "zip_nak": False, "name_ext": False,
           "silent": False, "reset": False, "size_nocr": False,
@@ -638,14 +640,22 @@ def load_io_files(root, only_names=None):
                 continue
             pairs.append(("SAT" if "SATELLITE" in head.upper() else "TER", p))
     for kind, p in pairs:
-        name = os.path.splitext(os.path.basename(p))[0].strip()
+        fn = os.path.basename(p)
+        name = os.path.splitext(fn)[0].strip()
         if only_names is not None and name not in only_names:
             continue
         try:
             with open(p, "rb") as f:
-                IO_FILES[kind][name] = f.read()
+                data = f.read()
         except OSError:
             continue
+        # 🔴 模拟真机的文件系统：**按字面文件名存**，只有 .XML 才算频道表。
+        #    真机 2026-11-03 实测：设备 TER 目录里只有 .XML 的文件被计入
+        #    表清单（TER-CH=5 对应 5 个 .XML）；传不带扩展名的名字过去，
+        #    设备会原样存成一个普通文件，表清单里根本不认它。
+        IO_STORE[kind][fn] = data
+        if fn.upper().endswith(".XML"):
+            IO_FILES[kind][name] = data
     log("[IO] 设备侧可传输的表：TER %d 张 / SAT %d 张（CRC=%s%s）"
         % (len(IO_FILES["TER"]), len(IO_FILES["SAT"]), IO_CFG["crc"],
            "，IAC 转义" if IO_CFG["esc"] else ""))
@@ -873,10 +883,22 @@ def fileio_respond(conn, query, body):
     if (not query) and k.startswith("INSTALLATION CURRENT REMOVE"):
         kind = m_tag.group(1).upper() if m_tag else "TER"
         name = m_tag.group(2).strip() if m_tag else ""
-        if name and name in IO_FILES[kind]:
-            del IO_FILES[kind][name]
+        # 真机按字面文件名删；带不带 .XML 都试一遍
+        cands = [name]
+        if not name.upper().endswith(".XML"):
+            cands.append(name + ".XML")
+        else:
+            cands.append(os.path.splitext(name)[0])
+        hit = None
+        for c in cands:
+            if c in IO_STORE[kind]:
+                hit = c
+                break
+        if hit:
+            del IO_STORE[kind][hit]
+            IO_FILES[kind].pop(os.path.splitext(hit)[0], None)
             conn.sendall(bytes([XOFF, ACK, XON]))
-            log("  [IO] 已删除 %s/%s" % (kind, name))
+            log("  [IO] 已删除 %s/%s" % (kind, hit))
         else:
             conn.sendall(bytes([XOFF, NAK, XON]))
             log("  [IO] NAK：要删的 %s/%s 不存在" % (kind, name))
@@ -914,16 +936,30 @@ def io_feed(conn, chunk):
         st["data"].extend(data)
         conn.sendall(bytes([ACK]))
         if len(st["data"]) >= st["size"]:
-            IO_FILES[st["kind"]][st["name"]] = bytes(st["data"])
-            log("  [IO] 收到 %s/%s（%d 字节）"
-                % (st["kind"], st["name"], len(st["data"])))
+            data = bytes(st["data"])
+            kind, want = st["kind"], st["name"]
+            # 🔴 真机行为：设备按**字面文件名**存；重名不会覆盖，而是自动改名
+            #    （真机 2026-11-03 实测：传 DEMO-X → 仪器 TER 目录里出现 DEMO-X_2）
+            fn = want
+            stem, ext = os.path.splitext(fn)
+            n = 1
+            while fn in IO_STORE[kind]:
+                n += 1
+                fn = "%s_%d%s" % (stem, n, ext)
+            IO_STORE[kind][fn] = data
+            # 只有 .XML 的文件才被设备当成频道表（不带扩展名的存下来了也不认）
+            if fn.upper().endswith(".XML"):
+                IO_FILES[kind][os.path.splitext(fn)[0]] = data
+            st["name"] = fn
+            log("  [IO] 收到 %s/%s（%d 字节%s）"
+                % (kind, fn, len(data),
+                   "" if fn == want else "；重名自动改名（原名 %s）" % want))
             if IO_CFG["dir"]:
                 try:
                     os.makedirs(IO_CFG["dir"], exist_ok=True)
-                    p = os.path.join(IO_CFG["dir"], "%s_%s.XML"
-                                     % (st["kind"], st["name"]))
+                    p = os.path.join(IO_CFG["dir"], fn)
                     with open(p, "wb") as f:
-                        f.write(st["data"])
+                        f.write(data)
                 except OSError:
                     pass
             st["on"] = False

@@ -652,14 +652,24 @@ class PlanIO(object):
 
     # ------------------------------------------------------------ 上传
     def upload(self, path, kind=None, name=None, block=None):
-        """把本地表文件推到设备。返回设备上的表名"""
+        """把本地表文件推到设备。返回设备上的表名
+
+        🔴 **表名必须带 `.XML`**（真机 2026-11-03 实测）：
+           设备的安装包里只数**带 .XML 的文件**（列出来的表数正好等于 .XML 文件数）。
+           我们以前把扩展名剥掉再发（`TER-CH=DEMO-X`），设备就**原样存成
+           一个无扩展名的普通文件** —— 文件管理器里能看到「DEMO-X」，
+           但设备不认它是频道表（表清单里没有它）；再传一次还会被设备
+           自动改名成「DEMO-X_2」。
+           所以 .XML 优先，不带的写法留作老固件兜底。
+        """
         if not os.path.isfile(path):
             raise FileIOError("文件不存在：%s" % path)
         kind = kind or ("SAT" if os.path.basename(
             os.path.dirname(os.path.abspath(path))).upper().startswith("SAT")
             else "TER")
-        name = (name or os.path.splitext(os.path.basename(path))[0]).strip()
-        if not name:
+        raw = (name or os.path.basename(path)).strip()
+        base = plain_name(raw)
+        if not base:
             raise FileIOError("上传的表名不能为空")
         if not self.crc_name:
             # 🔴 不知道 CRC 算法就别上传（乱发会让设备写进坏文件）
@@ -670,34 +680,46 @@ class PlanIO(object):
         block = block or self.block
         tag = TAGS[kind]
 
+        # 表名候选：带 .XML 优先（真机口径），再退到不带
+        cands = []
+        for c in (base + ".XML", raw if raw.upper().endswith(".XML") else base):
+            if c and c not in cands:
+                cands.append(c)
+
         # 命令按手册第 13 页：tag 直接当参数名，不带 "PC FILE"/"TAG="/"NAME="
         # 这几个词。旧写法留着兜底（万一某版固件只认它），但顺序是
         # 「先手册、后旧写法」—— 手册形态已被真机验证过的是下载侧，
         # 上传侧只有手册这一条硬依据。
         forms = [
-            "*INSTALLATION CURRENT %s=%s SIZE=%d BLOCK=%d" % (
-                tag, name, len(data), block),
-            "*INSTALLATION PC FILE TAG=%s NAME=%s SIZE=%d BLOCK=%d" % (
-                tag, name, len(data), block),
+            "*INSTALLATION CURRENT %s=%s SIZE=%d BLOCK=%d",
+            "*INSTALLATION PC FILE TAG=%s NAME=%s SIZE=%d BLOCK=%d",
         ]
         accepted = False
+        used = None
         tried = []
-        for i, cmd in enumerate(forms):
-            self.link.drain()
-            self._log("上传 %s（%d 字节）" % (cmd, len(data)))
-            self.link.send(cmd.encode("latin-1") + CR_B)
-            c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
-            if c != NAK:
-                accepted = True
+        checked = False
+        for cand in cands:
+            for i, tmpl in enumerate(forms):
+                cmd = tmpl % (tag, cand, len(data), block)
+                self.link.drain()
+                self._log("上传 %s（%d 字节）" % (cmd, len(data)))
+                self.link.send(cmd.encode("latin-1") + CR_B)
+                c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
+                if c != NAK:
+                    accepted = True
+                    used = cand
+                    break
+                tried.append(cmd)
+                if not checked:
+                    # 第一次被拒：先确认设备还在正常应答，别把
+                    # 「设备不应答」误当成「命令写法不对」再打一遍。
+                    checked = True
+                    self._raise_if_silent(FileIOError("设备拒绝接收（NAK）"))
+            if accepted:
                 break
-            tried.append(cmd)
-            if i == 0:
-                # 第一种写法被拒：先确认设备还在正常应答，别把
-                # 「设备不应答」误当成「命令写法不对」再打一遍。
-                self._raise_if_silent(FileIOError("设备拒绝接收（NAK）"))
         if not accepted:
             raise FileIOError("设备拒绝接收（NAK）：%s\n  试过：\n  %s"
-                              % (name, "\n  ".join(tried)))
+                              % (base, "\n  ".join(tried)))
 
         sent = 0
         while sent < len(data):
@@ -705,22 +727,34 @@ class PlanIO(object):
             self.link.send(chunk + bytes([crc_of(self.crc_name, chunk)]))
             self.link.wait_ctrl((ACK, NAK), timeout=20.0)
             sent += len(chunk)
-            self._tick(sent, len(data), "上传 " + name)
-        self._log("上传完成：%s（%d 字节）" % (name, len(data)))
-        return name
+            self._tick(sent, len(data), "上传 " + used)
+        self._log("上传完成：%s（%d 字节）" % (used, len(data)))
+        return used
 
     # ------------------------------------------------------------ 删除
     def remove(self, kind, name):
-        """删掉设备上的一张表"""
+        """删掉设备上的一张表
+
+        表名带 `.XML` 优先（设备上真名就是带扩展名的），不带扩展名的写法留兜底。
+        """
         tag = TAGS[kind]
-        self.link.drain()
-        cmd = "*INSTALLATION CURRENT REMOVE %s=%s" % (tag, name)
-        self._log("删除 %s" % cmd)
-        self.link.send(cmd.encode("latin-1") + CR_B)
-        c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
-        if c == NAK:
-            raise FileIOError("设备拒绝删除（NAK）：%s" % name)
-        return True
+        base = plain_name(name)
+        cands = []
+        for c in (base + ".XML", (name or "").strip()):
+            if c and c not in cands:
+                cands.append(c)
+        tried = []
+        for cand in cands:
+            self.link.drain()
+            cmd = "*INSTALLATION CURRENT REMOVE %s=%s" % (tag, cand)
+            self._log("删除 %s" % cmd)
+            self.link.send(cmd.encode("latin-1") + CR_B)
+            c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
+            if c != NAK:
+                return True
+            tried.append(cand)
+        raise FileIOError("设备拒绝删除（NAK）：%s（试过：%s）"
+                          % (name, "、".join(tried)))
 
     # ------------------------------------------------------------ 整装
     def download_zip(self, dest):
@@ -802,20 +836,30 @@ class PlanIO(object):
         pat = re.compile(r"SIZE\s*=\s*(\d+)", re.I)
         t0 = time.time()
         while True:
-            raw = self.link.peek()
+            raw = bytes(self.link.peek())
             i = raw.find(b"*")
             if i >= 0:
-                try:
-                    txt = raw[i:].decode("latin-1")
-                except Exception:
-                    txt = ""
-                m = pat.search(txt)
+                seg = raw[i:]
+                cr = seg.find(b"\r")
+                # 只看**第一行**（有 CR 就截到 CR 为止）：否则缓冲区里若先躺着
+                # 一条旧应答，正则会跨行匹配到后面那行的 SIZE，把两行拼成一行
+                head = seg[:cr] if cr >= 0 else seg
+                m = pat.search(head.decode("latin-1", "replace")
+                               if head else "")
                 if m:
                     end = i + m.end()
                     line = raw[i:end].decode("latin-1", "replace")
                     self.link.drop(end)
                     if b"\r" not in raw[i:end]:
                         self._log("SIZE 行结尾无 CR（按 XON 收尾），已按数字截取")
+                    return line
+                if cr >= 0:
+                    # 是一条**完整应答但不带 SIZE** → 说明这条命令被当成了别的查询
+                    # （实测不带 CURRENT 的形态会回 `*INSTALLATION NUMBER=2`）。
+                    # 立刻把设备原话交回去让上层换写法 —— 别干等满 10 秒，
+                    # 也别把它当超时丢掉（用户要看的就是这句原话）。
+                    line = head.decode("latin-1", "replace").strip()
+                    self.link.drop(i + cr + 1)
                     return line
             if time.time() - t0 > timeout:
                 raise FileIOError(

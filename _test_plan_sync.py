@@ -159,7 +159,8 @@ def case_a():
         p.add_channel("UP-ADDED", 666.0, "DVB-C", symbol_rate=6875)
         p.save(up)
         uploaded = sync.upload(up, kind="TER", name="UP-TEST")
-        check("上传返回设备上的表名", uploaded == "UP-TEST", uploaded)
+        # 🔴 设备上真名带 .XML（真机只认带扩展名的表），返回的应该是设备上的真名
+        check("上传返回设备上的表名", uploaded == "UP-TEST.XML", uploaded)
         names = sync.device_plans("TER")
         check("设备表清单里出现了新表", "UP-TEST" in names, names)
         back = os.path.join(src, "TER", "UP-BACK.XML")
@@ -518,8 +519,14 @@ def case_k():
     try:
         sync.connect()
         out = os.path.join(src, "TER", "DL-K.XML")
+        t0 = time.time()
         got = sync.download("TER", "DEMO-Analog", out, overwrite=True)
+        cost = time.time() - t0
         check("下得下来", os.path.isfile(got), got)
+        # 🔴 只按"能不能下"断言不够：SIZE 应答没有 CR 时，读行若等 CR 会白等 8 秒
+        # 才返回（内容照样对），真机上设备 5 秒等不到 ACK 就 NAK 中止 → 必失败。
+        # 所以耗时也要卡住。
+        check("下载耗时 < 5 秒（没在等不存在的 CR）", cost < 5.0, "%.2fs" % cost)
         check("内容与设备上的一致",
               filecmp.cmp(out, os.path.join(dev, "TER", "DEMO-Analog.XML"),
                           shallow=False))
@@ -527,19 +534,75 @@ def case_k():
         check("CRC 反推为 sum-neg", sync.io.crc_name == "sum-neg",
               str(sync.io.crc_name))
 
+        # 错误形态的应答必须**立刻**交回来：真机上不带 CURRENT 的写法会被设备
+        # 当成普通查询，回 `*INSTALLATION NUMBER=2`。若这里还在等 CR/SIZE，
+        # 就会白等满超时，错误信息里只剩"超时"，丢了设备原话。
+        sync.io.link.drain()
+        sync.io.link.send(b"*?INSTALLATION\r")
+        t1 = time.time()
+        line = sync.io._read_size_line(timeout=10.0)
+        dt = time.time() - t1
+        check("非 SIZE 应答立刻返回（不干等超时）", dt < 3.0, "%.2fs" % dt)
+        check("交回的是设备原话", "NUMBER=" in line.upper(), line)
+
         # 知道算法后上传应当解锁；改几个字节再传，回读一遍做闭环
         data = bytearray(open(out, "rb").read())
         data[-20:-10] = b"KEEPME1234"
         alt = os.path.join(src, "TER", "UL-K.XML")
         open(alt, "wb").write(bytes(data))
         name = sync.upload(alt, kind="TER", name="UL-K")
-        check("上传成功（%s）" % name, name == "UL-K", str(name))
-        check("设备清单里出现了这张表", "UL-K" in sync.device_plans("TER"),
+        # 🔴 设备上真名带 .XML：设备只认带扩展名的表，传不带的名字过去
+        #    它会原样存成普通文件、表清单里根本不认（真机 2026-11-03 实测）。
+        #    模拟器照同样的规矩办，所以这条断言就是在盯扩展名有没有带上。
+        check("上传成功（%s）" % name, name == "UL-K.XML", str(name))
+        check("设备清单里出现了这张表（说明存的是 .XML 文件）",
+              "UL-K" in sync.device_plans("TER"),
               str(sync.device_plans("TER")))
         back = os.path.join(src, "TER", "BACK-K.XML")
         sync.download("TER", "UL-K.XML", back, overwrite=True)
         check("回读内容与上传的一致",
               open(alt, "rb").read() == open(back, "rb").read())
+    finally:
+        sync.close()
+        mock.stop()
+        shutil.rmtree(dev, ignore_errors=True)
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def case_l():
+    print("\n== L 上传同名：设备自动改名，程序报设备上的真名 ==")
+    dev = demo_dir("pm_sync_dev_")
+    src = demo_dir("pm_sync_local_")
+    mock = Mock(dev, "--io-idx0", "--io-name-ext", "--io-size-nocr",
+                "--io-crc", "sum-neg")
+    sync = mk_sync(mock.port, src, verbose=True)
+    try:
+        sync.connect()
+        # 上传的前提是先知道 CRC 算法 → 先下一张
+        out = os.path.join(src, "TER", "DL-L.XML")
+        sync.download("TER", "DEMO-Analog", out, overwrite=True)
+
+        # 🔴 设备上真名带 .XML —— 传不带扩展名的名字，设备只当普通文件存，
+        #    表清单里不认（真机 2026-11-03 实测：仪器里多出一个无扩展名的普通文件）
+        newf = os.path.join(src, "TER", "UL-L.XML")
+        open(newf, "wb").write(open(out, "rb").read())
+        n1 = sync.upload(newf, kind="TER", name="UL-L")
+        check("第一次上传返回带 .XML 的名字", n1 == "UL-L.XML", str(n1))
+        check("设备清单里认这张表", "UL-L" in sync.device_plans("TER"),
+              str(sync.device_plans("TER")))
+
+        # 同名再传：设备**不会覆盖**，会自动改名 UL-L_2
+        n2 = sync.upload(newf, kind="TER", name="UL-L")
+        check("同名再传，程序报的是设备上的真名（自动改名）",
+              n2 == "UL-L_2.XML", str(n2))
+        plans = sync.device_plans("TER")
+        check("设备上有两张（UL-L 与 UL-L_2）",
+              "UL-L" in plans and "UL-L_2" in plans, str(plans))
+
+        # 删除命令也要认 .XML
+        sync.remove("TER", "UL-L_2")
+        check("删除后只剩一张", "UL-L_2" not in sync.device_plans("TER"),
+              str(sync.device_plans("TER")))
     finally:
         sync.close()
         mock.stop()
@@ -559,6 +622,7 @@ def main():
     case_i()
     case_j()
     case_k()
+    case_l()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
     if FAILS:
         print("失败项：")
