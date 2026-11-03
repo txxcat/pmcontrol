@@ -11,11 +11,16 @@
     PC : ACK
     DEV: XOFF，然后逐块：<数据 N 字节> + <CRC 1 字节> + XON
     PC : 每块校验 CRC → ACK；错就 NAK（设备重发或中止）
-上传（PC → 设备），单张表：
-    PC : *INSTALLATION PC FILE TAG=TER-CH NAME=<表名> SIZE=<n> BLOCK=<块><CR>
+上传（PC → 设备），单张表（手册第 13 页 "INSTALLATION PC FILE" 条目）：
+    PC : *INSTALLATION CURRENT TER-CH=<表名> SIZE=<n> BLOCK=<块><CR>
          然后逐块下发 <数据> + <CRC>，设备每块回 ACK
+    ⚠️ 手册里 "INSTALLATION PC FILE" / "INSTALLATION FILE ZIP" 这些是
+       **命令总表里的条目名**，不是命令本身。真正的命令用 tag 直接当参数名：
+       `*INSTALLATION CURRENT TER-CH=…`。以前把条目名当命令发过
+       （`*INSTALLATION PC FILE TAG=… NAME=…`），设备必然 NAK ——
+       同一个坑在整装下载上先踩过一次。
 删除：*INSTALLATION CURRENT REMOVE TAG=TER-CH <表名>
-整装：*?INSTALLATION CURRENT ZIP BLOCK=<n>  /  *INSTALLATION PC ZIP NAME=.. SIZE=.. BLOCK=..
+整装：*?INSTALLATION CURRENT ZIP BLOCK=<n>  /  *INSTALLATION ZIP NAME=.. SIZE=.. BLOCK=..
 
 🔴 三个必须记住的坑
 ------------------
@@ -646,14 +651,34 @@ class PlanIO(object):
         block = block or self.block
         tag = TAGS[kind]
 
-        self.link.drain()
-        cmd = "*INSTALLATION PC FILE TAG=%s NAME=%s SIZE=%d BLOCK=%d" % (
-            tag, name, len(data), block)
-        self._log("上传 %s（%d 字节）" % (cmd, len(data)))
-        self.link.send(cmd.encode("latin-1") + CR_B)
-        c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
-        if c == NAK:
-            raise FileIOError("设备拒绝接收（NAK）：%s" % name)
+        # 命令按手册第 13 页：tag 直接当参数名，不带 "PC FILE"/"TAG="/"NAME="
+        # 这几个词。旧写法留着兜底（万一某版固件只认它），但顺序是
+        # 「先手册、后旧写法」—— 手册形态已被真机验证过的是下载侧，
+        # 上传侧只有手册这一条硬依据。
+        forms = [
+            "*INSTALLATION CURRENT %s=%s SIZE=%d BLOCK=%d" % (
+                tag, name, len(data), block),
+            "*INSTALLATION PC FILE TAG=%s NAME=%s SIZE=%d BLOCK=%d" % (
+                tag, name, len(data), block),
+        ]
+        accepted = False
+        tried = []
+        for i, cmd in enumerate(forms):
+            self.link.drain()
+            self._log("上传 %s（%d 字节）" % (cmd, len(data)))
+            self.link.send(cmd.encode("latin-1") + CR_B)
+            c = self.link.wait_ctrl((ACK, NAK), timeout=10.0)
+            if c != NAK:
+                accepted = True
+                break
+            tried.append(cmd)
+            if i == 0:
+                # 第一种写法被拒：先确认设备还在正常应答，别把
+                # 「设备不应答」误当成「命令写法不对」再打一遍。
+                self._raise_if_silent(FileIOError("设备拒绝接收（NAK）"))
+        if not accepted:
+            raise FileIOError("设备拒绝接收（NAK）：%s\n  试过：\n  %s"
+                              % (name, "\n  ".join(tried)))
 
         sent = 0
         while sent < len(data):

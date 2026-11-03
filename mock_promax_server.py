@@ -732,7 +732,7 @@ def fileio_respond(conn, query, body):
       *?INSTALLATION CURRENT TER-CH=<名> BLOCK=<n>   下载单表
       *?INSTALLATION CURRENT ZIP BLOCK=<n>           整装下载
       *?INSTALLATION CURRENT TER-CH=<序号>           取第 n 张表名（--io-no-tag 时 NAK）
-      *INSTALLATION PC FILE TAG=.. NAME=.. SIZE=.. BLOCK=..   上传单表
+      *INSTALLATION CURRENT TER-CH=<名> SIZE=.. BLOCK=..    上传单表（手册形态）
       *INSTALLATION CURRENT REMOVE TER-CH=<名>       删除
     """
     import re as _re
@@ -828,13 +828,23 @@ def fileio_respond(conn, query, body):
         return True
 
     # ---------- 上传单表 ----------
-    if (not query) and k.startswith("INSTALLATION PC FILE"):
+    # 两种写法都认：
+    #   *INSTALLATION CURRENT TER-CH=<名> SIZE=.. BLOCK=..   ← 手册第 13 页，客户端首选
+    #   *INSTALLATION PC FILE TAG=.. NAME=.. SIZE=.. BLOCK=.. ← 旧写法（条目名当命令）
+    if (not query) and "SIZE=" in k and (
+            k.startswith("INSTALLATION PC FILE")
+            or (k.startswith("INSTALLATION CURRENT") and "REMOVE" not in k)):
         kv = {}
         for item in body.split():
             if "=" in item:
                 a, b = item.split("=", 1)
                 kv[a.upper()] = b
-        kind = (kv.get("TAG", "TER-CH").upper().split("-")[0])
+        if m_tag and "NAME" not in kv:
+            kind = m_tag.group(1).upper()
+            name = m_tag.group(2).strip()
+        else:
+            kind = (kv.get("TAG", "TER-CH").upper().split("-")[0])
+            name = kv.get("NAME", "").strip()
         if kind not in ("TER", "SAT"):
             kind = "TER"
         try:
@@ -842,7 +852,6 @@ def fileio_respond(conn, query, body):
         except ValueError:
             size = 0
         block = int(kv.get("BLOCK", IO_CFG["block"]) or IO_CFG["block"])
-        name = kv.get("NAME", "").strip()
         if not name or size <= 0 or size > 8 * 1024 * 1024:
             conn.sendall(bytes([XOFF, NAK, XON]))
             log("  [IO] NAK 上传参数不合法")

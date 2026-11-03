@@ -376,7 +376,7 @@ class Probe(object):
 
     def probe_upload(self, kind="TER"):
         """上传一张自造的小表 → 回读比对 → 删掉。会写仪器，必须显式开启。"""
-        self.head("7. 单表上传（写仪器，读完即删）  *INSTALLATION PC FILE …")
+        self.head("7. 单表上传（写仪器，读完即删）  *INSTALLATION CURRENT TER-CH=… SIZE=… BLOCK=…")
         if not self.crc_known:
             self.say("  （CRC 没反推出来，上传必失败，跳过）")
             self.verdict_add("单表上传", False, "CRC 未知，跳过")
