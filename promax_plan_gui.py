@@ -1461,7 +1461,12 @@ class App(object):
         except (TypeError, ValueError):
             port = 2222
         return PlanSync(ip, port, source=self.source, log=self._sync_log,
-                        timeout=20.0)
+                        timeout=20.0,
+                        transport=str(self.cfg.get("sync_transport", "auto")),
+                        sftp_port=int(self.cfg.get("sftp_port", 22) or 22),
+                        sftp_user=self.cfg.get("sftp_user") or "Promax",
+                        sftp_password=(self.cfg.get("sftp_password")
+                                       or "Monitoring2019"))
 
     def _sync_log(self, text):
         """同步线程的日志转发。
@@ -2011,6 +2016,61 @@ class App(object):
         hsb3.grid(row=1, column=0, sticky="ew")
         raw.insert("1.0", json.dumps(self.cfg, ensure_ascii=False, indent=2))
 
+        # ---- 同步（与仪器交换频道表的传输方式）----
+        # 单独一页：「基本」页已经快撑满 800px 高，再加行会把下面的输入框
+        # 挤出可视区（Notebook 不会自动滚动）。
+        f5 = ttk.Frame(nb, padding=16)
+        nb.add(f5, text="同步")
+        ttk.Label(f5, text="与仪器交换频道表走哪条通道",
+                  font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(f5, text="仪器对外是三个独立服务：2222 远程控制命令、"
+                           "22 SSH/SFTP 传文件、80 网页端。\n"
+                           "SFTP 直接读写文件，不用分块协议，也不涉及 CRC 校准 —— 能开就优先用它。",
+                  foreground=HINT, justify="left").pack(anchor="w", pady=(2, 12))
+
+        g = ttk.Frame(f5)
+        g.pack(fill="x")
+        g.columnconfigure(1, weight=1)
+
+        TRANS_LABEL = {"auto": "自动（优先 SFTP，不通再退回 Telnet）",
+                       "sftp": "只走 SFTP（更快更稳，老固件可能没有）",
+                       "telnet": "只走 Telnet（兼容性最好，上传要先校准 CRC）"}
+        cur_t = str(self.cfg.get("sync_transport", "auto")).lower()
+        if cur_t not in TRANS_LABEL:
+            cur_t = "auto"
+        t_var = tk.StringVar(value=TRANS_LABEL[cur_t])
+
+        def row(label, widget, hint=None):
+            r = row.n
+            ttk.Label(g, text=label).grid(row=r, column=0, sticky="w", pady=5)
+            widget.grid(row=r, column=1, sticky="w", pady=5)
+            if hint:
+                ttk.Label(g, text=hint, foreground=HINT).grid(
+                    row=r, column=2, sticky="w", padx=10)
+            row.n += 1
+
+        row.n = 0
+        row("传输方式",
+            ttk.Combobox(g, textvariable=t_var, width=42, state="readonly",
+                         values=list(TRANS_LABEL.values())))
+
+        port_e = ttk.Entry(g, width=10)
+        port_e.insert(0, str(self.cfg.get("sftp_port", 22)))
+        row("SFTP 端口", port_e, "手册 11.3.4：22")
+
+        user_e = ttk.Entry(g, width=20)
+        user_e.insert(0, self.cfg.get("sftp_user", "Promax"))
+        row("SFTP 账号", user_e, "手册出厂默认 Promax")
+
+        pwd_e = ttk.Entry(g, width=20, show="*")
+        pwd_e.insert(0, self.cfg.get("sftp_password", "Monitoring2019"))
+        row("SFTP 密码", pwd_e, "手册出厂默认 Monitoring2019；现场改过就填新的")
+
+        ttk.Label(f5, text="仪器上改过 webControl 密码不影响这里 —— "
+                           "SFTP 是独立的系统账号。\n"
+                           "账号密码存在 config.json 里（该文件不随程序分发）。",
+                  foreground=HINT, justify="left").pack(anchor="w", pady=(12, 0))
+
         # ---- 关于（版本号 / 更新日期 / 项目地址 / 运行环境）----
         # 版本号只从 promax_version 取，这里不写任何字面量 ——
         # 否则发版时总会漏掉一处（标题、关于页、README 各写一遍的老毛病）。
@@ -2111,6 +2171,15 @@ class App(object):
                 except ValueError:
                     base["port"] = 2222
                 base["pause_between"] = bool(pause_var.get())
+                # 传输方式：界面上是中文说明，存回配置要转成键名
+                _rev = {v: k for k, v in TRANS_LABEL.items()}
+                base["sync_transport"] = _rev.get(t_var.get().strip(), "auto")
+                try:
+                    base["sftp_port"] = int(port_e.get().strip() or 22)
+                except ValueError:
+                    base["sftp_port"] = 22
+                base["sftp_user"] = user_e.get().strip() or "Promax"
+                base["sftp_password"] = pwd_e.get() or "Monitoring2019"
                 base["export_format"] = (
                     "csv" if fmt_var.get().strip().lower() == "csv"
                     else "xlsx")

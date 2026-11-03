@@ -28,12 +28,14 @@
     sync.close()
 """
 import os
+import socket
 import tempfile
 import time
 import zipfile
 
 import promax_fileio as F
 import promax_plan_edit as E
+import promax_sftp as SF
 from promax_telnet_test import PromaxConnLost, PromaxError, PromaxTelnet
 
 # 设备命令形态（按顺序尝试，成功一个就记住）
@@ -41,6 +43,12 @@ DOWNLOAD_FORMS = (
     "*?INSTALLATION CURRENT {tag}={name} BLOCK={block}",   # 手册原样
     "*?INSTALLATION {tag}={name} BLOCK={block}",           # 去掉 CURRENT
 )
+
+# 某个 (host, ssh端口) 上 SFTP 到底通不通 —— auto 模式只探一次，
+# 免得每次同步都先等一遍 SSH 超时
+_SFTP_OK = {}
+
+TRANSPORTS = ("auto", "sftp", "telnet")
 
 
 PlanError = E.PlanError
@@ -54,7 +62,8 @@ class PlanSync(object):
     """一台设备的频道表同步会话"""
 
     def __init__(self, host, port=2222, source="CH", log=None, progress=None,
-                 verbose=False, timeout=15.0):
+                 verbose=False, timeout=15.0, transport="telnet",
+                 sftp_port=None, sftp_user=None, sftp_password=None):
         self.host = host
         self.port = int(port)
         self.source = os.path.abspath(source)
@@ -62,26 +71,94 @@ class PlanSync(object):
         self.progress = progress
         self.verbose = verbose
         self.timeout = timeout
+        self.transport = transport if transport in TRANSPORTS else "telnet"
+        self.sftp_port = int(sftp_port or SF.SFTP_PORT)
+        self.sftp_user = sftp_user or SF.SFTP_USER
+        self.sftp_password = sftp_password or SF.SFTP_PASSWORD
+        self.mode = None              # 实际走的路："sftp" / "telnet"
+        self.sp = None                # PlanSFTP 会话
         self.conn = None
         self.io = None
-        self.strategy = ""            # "single" / "zip" / ""
+        self.strategy = ""            # "sftp" / "single" / "zip" / ""
         self.crc_ready = False
         self._zip_cache = None        # (path, {kind: {name: arcname}})
         self._tag_ok = None           # 单表命令是否可用（None=未知）
 
     # ------------------------------------------------------------ 连接
+    def _sftp_available(self):
+        """auto 模式下先问一句：22 端口有没有人接（探一次，结果缓存）"""
+        key = (self.host, self.sftp_port)
+        if key in _SFTP_OK:
+            return _SFTP_OK[key]
+        ok = False
+        try:
+            s = socket.create_connection((self.host, self.sftp_port),
+                                         timeout=2.0)
+            try:
+                s.settimeout(2.0)
+                banner = s.recv(64)          # SSH 服务端会主动送 banner
+                ok = banner.startswith(b"SSH-")
+            finally:
+                s.close()
+        except OSError:
+            ok = False
+        _SFTP_OK[key] = ok
+        return ok
+
+    def _pick_mode(self):
+        if self.transport == "sftp":
+            return "sftp"
+        if self.transport == "telnet":
+            return "telnet"
+        return "sftp" if self._sftp_available() else "telnet"
+
     def connect(self):
-        if self.conn is not None:
+        if self.mode is not None:
             return self
+        mode = self._pick_mode()
+        if mode == "sftp":
+            sp = SF.PlanSFTP(self.host, port=self.sftp_port,
+                             user=self.sftp_user,
+                             password=self.sftp_password,
+                             log=self.log, timeout=self.timeout,
+                             progress=self._tick)
+            try:
+                sp.connect()
+                sp.discover()        # 目录结构不对就在这儿失败，好退回 telnet
+            except SF.SftpError as e:
+                sp.close()
+                if self.transport == "sftp":
+                    raise SyncError(str(e))
+                self.log("SFTP 不可用（%s），退回 Telnet" % e)
+                _SFTP_OK[(self.host, self.sftp_port)] = False
+                mode = "telnet"
+            else:
+                self.sp = sp
+                self.mode = "sftp"
+                self.strategy = "sftp"
+                self.crc_ready = True         # SFTP 不需要 CRC 校准
+                self.log("传输方式：SFTP（%s:%d）"
+                         % (self.host, self.sftp_port))
+                return self
+        self.mode = "telnet"
         self.conn = PromaxTelnet(self.host, self.port, timeout=self.timeout,
                                  verbose=self.verbose)
         self.conn.connect()
         self.io = F.PlanIO(self.conn, verbose=self.verbose,
                            progress=self._tick)
-        self.log("已连接 %s:%d" % (self.host, self.port))
+        self.log("已连接 %s:%d（Telnet）" % (self.host, self.port))
         return self
 
     def reconnect(self):
+        if self.mode == "sftp":
+            try:
+                if self.sp is not None:
+                    self.sp.close()
+            except Exception:
+                pass
+            self.sp = None
+            self.mode = None
+            return self.connect()
         if self.conn is None:
             return self.connect()
         self.conn.reconnect()
@@ -92,13 +169,20 @@ class PlanSync(object):
 
     def close(self):
         self._drop_zip_cache()
+        if self.sp is not None:
+            try:
+                self.sp.close()
+            except Exception:
+                pass
         if self.conn is not None:
             try:
                 self.conn.close()
             except Exception:
                 pass
+        self.sp = None
         self.conn = None
         self.io = None
+        self.mode = None
 
     def __enter__(self):
         return self.connect()
@@ -117,14 +201,20 @@ class PlanSync(object):
     def device_info(self):
         """设备概况：{'TER': n, 'SAT': n, 'name': 安装名}"""
         self.connect()
+        if self.mode == "sftp":
+            return self.sp.device_info()
         return self.io.counts()
 
     def device_plans(self, kind):
         """设备上某频段的表名列表。
 
-        优先"按序号取名"（单表路线）；不认就退回整装 ZIP 里读文件名。
+        SFTP：直接列目录，一次就准。
+        Telnet：优先"按序号取名"（单表路线）；不认就退回整装 ZIP 里读文件名。
         """
         self.connect()
+        if self.mode == "sftp":
+            self.strategy = "sftp"
+            return self.sp.device_plans(kind)
         if self._tag_ok is not False:
             try:
                 names = self.io.plan_names(kind)
@@ -203,6 +293,9 @@ class PlanSync(object):
         dest = dest or E.plan_path(self.source, kind, name)
         if os.path.exists(dest) and not overwrite:
             raise SyncError("本地已有同名表：%s" % os.path.basename(dest))
+        if self.mode == "sftp":
+            self.strategy = "sftp"
+            return self.sp.download(kind, name, dest, overwrite=overwrite)
         if self._tag_ok is not False:
             try:
                 self._download_single(kind, name, dest)
@@ -283,8 +376,14 @@ class PlanSync(object):
 
     # ------------------------------------------------------------ 上传
     def calibrate_crc(self):
-        """上传前必须先知道 CRC 算法：随便下一张最小的表来反推"""
+        """上传前必须先知道 CRC 算法：随便下一张最小的表来反推
+
+        SFTP 模式不需要 —— 那是分块协议才有的东西，直接放行。
+        """
         self.connect()
+        if self.mode == "sftp":
+            self.crc_ready = True
+            return "sftp"
         if self.io.crc_name:
             self.crc_ready = True
             return self.io.crc_name
@@ -313,13 +412,21 @@ class PlanSync(object):
            风险太大，不自动降级 —— 需要时由用户显式选择（后续版本）。
         """
         self.connect()
+        kind = kind or E.kind_of_path(path)
+        name = (name or os.path.splitext(os.path.basename(path))[0]).strip()
+        if self.mode == "sftp":
+            self.strategy = "sftp"
+            try:
+                got = self.sp.upload(path, kind=kind, name=name)
+            except SF.SftpError as e:
+                raise SyncError("上传失败：%s" % e)
+            self.log("SFTP 上传完成：%s" % name)
+            return got
         if self._tag_ok is False:
             raise SyncError(
                 "这台固件不接受单表文件命令（实测 31.17 对带 TER-CH= 的命令回 NAK），"
                 "整装 ZIP 上传会整体替换设备安装包，暂不自动执行。\n"
-                "请先跑 _probe_io.py 把结果发我，再决定用哪条路。")
-        kind = kind or E.kind_of_path(path)
-        name = (name or os.path.splitext(os.path.basename(path))[0]).strip()
+                "建议改用 SFTP（设置里把传输方式改成 SFTP）。")
         self.calibrate_crc()
         try:
             got = self.io.upload(path, kind=kind, name=name)
@@ -332,6 +439,11 @@ class PlanSync(object):
     def remove(self, kind, name):
         """删设备上的一张表（不可撤销 —— 调用方必须先确认）"""
         self.connect()
+        if self.mode == "sftp":
+            try:
+                return self.sp.remove(kind, name)
+            except SF.SftpError as e:
+                raise SyncError("删除失败：%s" % e)
         if self._tag_ok is False:
             raise SyncError("这台固件不接受单表删除命令")
         try:
@@ -341,12 +453,53 @@ class PlanSync(object):
 
     # ------------------------------------------------------------ 整装
     def download_installation(self, dest_zip=None):
-        """整装下载（备份/换机迁移用）。返回 zip 路径"""
+        """整装下载（备份/换机迁移用）。返回 zip 路径
+
+        Telnet：走仪器的整装 ZIP 命令，拿到的是完整安装包。
+        SFTP：仪器没有"打包"这回事，只能自己把 CH 目录（频道表）打下来，
+              结构仍是 CH/TER|SAT，导入端不用改。
+        """
         self.connect()
         dest_zip = dest_zip or os.path.join(
             self.source, "installation-%s.zip"
             % time.strftime("%Y%m%d-%H%M%S"))
+        if self.mode == "sftp":
+            return self._download_ch_zip(dest_zip)
         self.io.download_zip(dest_zip)
+        return dest_zip
+
+    def _download_ch_zip(self, dest_zip):
+        """把仪器上的 CH 目录整个拉下来打成 zip（保持相对结构）"""
+        import posixpath
+        sp = self.sp
+        sp.discover()
+        ch_root = posixpath.join(sp.root, "CH")
+        dirs = [ch_root]
+        n = 0
+        F.ensure_dir(dest_zip)
+        with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as z:
+            while dirs:
+                d = dirs.pop()
+                for a in sp._ls(d):
+                    full = posixpath.join(d, a.filename)
+                    if sp._isdir(a):
+                        dirs.append(full)
+                        continue
+                    if not a.filename.upper().endswith(E.PLAN_EXT.upper()):
+                        continue          # 只收频道表，截图/日志不收
+                    tmp = tempfile.mkstemp(suffix=".xml")[1]
+                    try:
+                        sp.sftp.get(full, tmp)
+                        arc = posixpath.relpath(full, sp.root)
+                        z.write(tmp, arc)
+                        n += 1
+                    finally:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+        self.log("SFTP 整装（仅频道表）完成：%d 个文件 → %s"
+                 % (n, os.path.basename(dest_zip)))
         return dest_zip
 
     def import_installation(self, zip_path, overwrite=False):

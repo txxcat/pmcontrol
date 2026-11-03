@@ -227,8 +227,14 @@ def test_settings_window():
                   got == [True, True, True, True, False], str(got))
         combos = [w for w in widgets if w.winfo_class() == "TCombobox"]
         vals = [c.get() for c in combos]
-        check("只剩「导出格式」一个下拉框（不再有 yes/no）",
-              len(combos) == 1 and vals == ["xlsx"], str(vals))
+        # ⚠️ 断言的是「没有 yes/no 下拉框」，不是「只有一个下拉框」——
+        # 传输方式（自动/SFTP/Telnet）是真正的三选一，本来就该是下拉框。
+        check("没有 yes/no 下拉框了",
+              not any(str(v).strip().lower() in ("yes", "no", "是", "否")
+                      for v in vals), str(vals))
+        check("「导出格式」下拉框还在", "xlsx" in vals, str(vals))
+        check("「传输方式」是三选一（不是布尔）",
+              any("SFTP" in str(v) for v in vals), str(vals))
 
         if len(sws) == 5:
             sws[0]._on_click()          # 表间暂停：开 → 关

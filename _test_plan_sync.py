@@ -259,7 +259,7 @@ def case_b():
             check("上传被明确拒绝", True)
             check("拒绝理由说清了风险",
                   "整装" in msg and ("替换" in msg or "NAK" in msg), msg)
-            check("提示指向诊断脚本", "_probe_io" in msg, msg)
+            check("提示指向 SFTP 这条出路", "SFTP" in msg, msg)
     finally:
         sync.close()
         mock.stop()

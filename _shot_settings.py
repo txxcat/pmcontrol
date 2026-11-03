@@ -4,6 +4,7 @@
   docs/pmcontrol_main.png         主界面（已应用演示预设）
   docs/screenshot-settings.png    设置界面（基本页）
   docs/screenshot-about.png       设置界面（关于页：版本号 / 更新日期 / 项目地址）
+  docs/screenshot-sync.png        设置界面（同步页：传输方式 / SFTP 账号）
   docs/screenshot-progress.png    进度反馈（列表高亮 + 两条进度条）
 
 🔴 四道防线，缺一不可：
@@ -224,7 +225,7 @@ def grab(win, rel, root):
     print("saved %s  %s  (bbox=%d,%d,%dx%d)" % (out, img.size, x, y, w, h))
 
 
-def main(which=("main", "settings", "about", "progress")):
+def main(which=("main", "settings", "about", "sync", "progress")):
     """生成 README 用的界面截图。
 
     ⚠️ 必须放在 `if __name__ == "__main__"` 里执行：本模块的函数会被别的脚本
@@ -260,7 +261,7 @@ def main(which=("main", "settings", "about", "progress")):
             grab(root, os.path.join("docs", "pmcontrol_main.png"), root)
 
         # ---- 2) 设置界面（含「关于」页）----
-        if "settings" in which or "about" in which:
+        if "settings" in which or "about" in which or "sync" in which:
             # 「关于」页会把频道表目录印出来 —— 截图时指向中性演示路径，
             # 否则会把本机临时目录（含用户名）截进图里
             real_src = app.source
@@ -294,6 +295,22 @@ def main(which=("main", "settings", "about", "progress")):
                 settle(root, 20)
                 assert_no_local_user(root)      # 防线 4（关于页有路径文字）
                 grab(win, os.path.join("docs", "screenshot-about.png"), root)
+            if "sync" in which:
+                # 「同步」页：传输方式（自动/SFTP/Telnet）+ SFTP 账号端口。
+                # 密码框是 show="*"，截出来是圆点；账号是手册出厂默认值，可公开。
+                nbs = [w for w in _descend(win)
+                       if w.winfo_class() == "TNotebook"]
+                if not nbs:
+                    root.destroy()
+                    raise SystemExit("!! 设置窗里没找到标签页容器")
+                nb = nbs[0]
+                for t in nb.tabs():
+                    if str(nb.tab(t, "text")) == "同步":
+                        nb.select(t)
+                        break
+                settle(root, 20)
+                assert_no_local_user(root)      # 防线 4
+                grab(win, os.path.join("docs", "screenshot-sync.png"), root)
             app.source = real_src               # 还原（下面的步骤还要用它）
 
         # ---- 3) 「已选频道表」进度高亮 + 两条进度条（状态同框）----

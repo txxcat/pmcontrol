@@ -13,6 +13,10 @@
   "pause_between": true,
   "export_format": "xlsx",           # 结果文件格式：xlsx / csv
   "export_promax": false,            # 同时生成 Promax 格式 .XML（默认关）
+  "sync_transport": "auto",          # 与仪器同步：auto / sftp / telnet
+  "sftp_port": 22,                   # SSH/SFTP 端口（手册 11.3.4）
+  "sftp_user": "Promax",             # 出厂默认账号
+  "sftp_password": "Monitoring2019", # 出厂默认密码（现场可能改过）
   "presets": [...]                   # 本地预设组（真实数据，不上传）
 }
 
@@ -90,6 +94,15 @@ DEFAULT_CONFIG = {
     # 额外再生成一份"独立日志"（与结果文件同目录同主名，覆盖式），
     # 便于调试时单独查看某一次测试，不影响上面那个追加式单一日志。
     "log_separate": False,
+    # ---- 与仪器交换频道表的传输方式 ----
+    # 仪器对外是三个独立服务：2222 远程控制命令 / 22 SSH+SFTP / 80 webControl。
+    # SFTP 直接读写仪器上的频道表文件（<安装>/CH/TER|SAT），不走分块协议、
+    # 不需要 CRC 校准 —— 能开就优先用它。auto = 先探 22 端口，通就走 SFTP，
+    # 不通自动退回 Telnet（老固件没有 SFTP）。
+    "sync_transport": "auto",       # auto / sftp / telnet
+    "sftp_port": 22,
+    "sftp_user": "Promax",          # 手册（F9.0 11.3.4）给的出厂默认
+    "sftp_password": "Monitoring2019",
     "presets": [],
 }
 
