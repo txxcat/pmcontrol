@@ -16,10 +16,14 @@
 1. **备份的是真实运营数据**：这些 zip 绝不能进仓库（.gitignore 已挡 `bak/`）。
 2. **只在文件能正常解析时备份**：损坏的表固化进备份等于把坏数据锁死，
    与 config 备份"只备份合法 json"是同一个道理。
+   ⚠️ 例外是 `backup_files()`（删设备表前保存原文）：那边**不解析**，
+      因为设备表可能用了本地解析器不认的写法，跳过就等于没备份。
 3. 备份是**整体快照**（不是增量）：一张 zip 就是一个完整的 CH 目录，
    还原时要么全量覆盖，要么不覆盖 —— 避免半新半旧。
+   `backup_files()` 是例外 —— 它只装调用方选中的那几张。
 """
 import datetime
+import hashlib
 import os
 import re
 import zipfile
@@ -122,6 +126,62 @@ def backup_plans(source, app_dir=None, tag="", keep=BACKUP_KEEP, reason=""):
                          % (E.KIND_LABEL[E.kind_of_path(disk)], arc, cnt, size))
         lines.append("")
         lines.append("合计 %d 张表" % total)
+        z.writestr(MANIFEST, "\n".join(lines) + "\n")
+    os.replace(tmp, path)
+    _prune(bdir, keep, keep_path=path)
+    return path
+
+
+def backup_files(files, app_dir=None, tag="", reason="", keep=BACKUP_KEEP):
+    """把指定的几张表**按原样字节**打包备份；返回 zip 路径（无有效文件返回 None）。
+
+    与 backup_plans() 的区别（🔴 删除设备表专用）
+    ----------------------------------------------
+    backup_plans() 会先用 E.load_plan() 解析，解析不了就跳过 —— 这适合备份
+    本地 CH/（坏数据不该固化进快照）。但**设备上的表可能用了本地解析器不认的
+    写法**，若在这里复用它，就会出现「manifest 写着跳过、zip 里没有这张表，
+    程序却照样把设备上的表删了」——等于没备份。
+
+    所以本函数**不解析、不筛选**，读到的字节原样写进 zip，并在 manifest 里
+    记下大小与 SHA256 供事后核对。zip 内仍是 CH/TER|SAT/<名>.XML，
+    可以直接用 restore_plans() 还原到本地 CH/，再上传回设备。
+
+    files: [(磁盘路径, zip 内路径)]；tag/reason 只影响文件名与 manifest 可读性。
+    """
+    pairs = [(disk, arc) for disk, arc in (files or [])
+             if os.path.isfile(disk)]
+    if not pairs:
+        return None
+    bdir = backup_dir(app_dir)
+    os.makedirs(bdir, exist_ok=True)
+    stamp = _stamp()
+    name = "%s%s%s%s" % (BACKUP_PREFIX, stamp,
+                         ("-" + tag if tag else ""), BACKUP_EXT)
+    path = os.path.join(bdir, name)
+    n = 2
+    while os.path.exists(path):                   # 同一秒内连点两次
+        path = os.path.join(bdir, "%s%s-%d%s"
+                            % (BACKUP_PREFIX, stamp, n, BACKUP_EXT))
+        n += 1
+
+    lines = ["频道表备份（指定文件 / 原样字节） %s"
+             % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+    if reason:
+        lines.append("触发: %s" % reason)
+    lines.append("这些文件未经解析，按设备上的原始内容保存。")
+    lines.append("还原：频道表管理 → 还原备份 → 选本 zip → 还原到本地，再上传到设备。")
+    lines.append("")
+    lines.append("%-40s %10s  %s" % ("压缩包内路径", "字节", "SHA256"))
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for disk, arc in pairs:
+            with open(disk, "rb") as f:
+                data = f.read()
+            z.writestr(arc, data)
+            lines.append("%-40s %10d  %s"
+                         % (arc, len(data), hashlib.sha256(data).hexdigest()))
+        lines.append("")
+        lines.append("合计 %d 张表" % len(pairs))
         z.writestr(MANIFEST, "\n".join(lines) + "\n")
     os.replace(tmp, path)
     _prune(bdir, keep, keep_path=path)

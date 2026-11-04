@@ -14,7 +14,11 @@
 · **深色模式**：Listbox / Text 用 `promax_theme` 显式配色，ttk 跟随系统。
 · **覆盖本地前自动备份**：走 `promax_plan_backup.backup_plans()`，
   与保存 / 删除 / 改名 / 还原同一套规矩。
-· **不提供删除设备表的入口**：设备侧没有回滚命令，太危险。
+· **删除设备表：只删选中的，且有前置备份**。设备侧没有回滚命令，所以
+  `remove_selected()` 先把每张表按原样下载、打成 `bak/…-pre-delete.zip`，
+  **备份成功才允许删除**，任何一步失败就一张都不删；界面还要过一层
+  勾选确认。绝不提供「删除全部」入口。备份走 `backup_files()`（不解析
+  XML）—— 设备表若被解析器跳过，等于没备份却把表删了。
 · **状态只有三态**：设备清单只有表名，拿不到频点数 / 大小 / 时间，
   所以列表里只标「同名 / 仅本地 / 仅设备」。同名**不代表内容相同**，
   要看内容就点「对比…」—— 那会把设备那张下载到临时目录再解析。
@@ -123,15 +127,17 @@ def row_text(it, local, device):
 
 # ============================================================ 真机后端
 class SyncBackend(object):
-    """把 PlanSync 包成窗口需要的五个动作。
+    """把 PlanSync 包成窗口需要的几个动作（列举 / 下载 / 上传 / 删除 / 对比）。
 
     所有**联网**方法都在 worker 线程里被调用；`rescan_local()` 是纯本地
     重扫，主线程直接调。改完 `local / device` 后由窗口在 result 事件里刷新。
     """
 
-    def __init__(self, sync_factory, source):
+    def __init__(self, sync_factory, source, backup_app_dir=None):
         self.sync_factory = sync_factory
         self.source = os.path.abspath(source)
+        # 备份 zip 落在 <程序目录>/bak/；测试可指到临时目录隔离磁盘
+        self.backup_app_dir = backup_app_dir
         self.local = {}
         self.device = {}
         self.cfg_error = ""
@@ -290,6 +296,93 @@ class SyncBackend(object):
             self._close(sync)
         emit(("progress", len(items), len(items), "完成"))
         return {"ok": n, "fail": bad}
+
+    # ---------------------------------------------------------- 删除设备表
+    def remove_selected(self, items, emit):
+        """删除**选中的**设备表 —— 🔴 备份成功是删除的前置条件。
+
+        顺序（一步都不能省）：
+          1. 逐张把设备表按原样下载到临时目录（不经 XML 解析）
+          2. 全部成功后打成 `bak/CH-<时间>-pre-delete.zip`
+          3. 确认 zip 已落盘，**才**逐张调用 remove()
+        任何一张下载失败、下载到空文件、或打包失败 → `aborted=True`，
+        **一张都不删**。备份没做成就删，比不删危险得多。
+
+        返回 {"ok", "fail", "backup", "aborted"}。
+        """
+        items = list(items or [])
+        n = len(items)
+        res = {"ok": 0, "fail": [], "backup": None, "aborted": False}
+        if not n:
+            return res
+        total = n * 2 + 1
+        tmp = tempfile.mkdtemp(prefix="pm_del_")
+        sync = None
+        pairs = []
+        try:
+            sync = self._new_sync(emit)
+            sync.connect()
+            # ---- 阶段 1：把每一张表原样取回来 ----
+            for i, it in enumerate(items):
+                emit(("progress", i, total, "备份 %s（%d/%d）"
+                      % (it.filename, i + 1, n)))
+                dest = os.path.join(tmp, E.KIND_DIRS[it.kind], it.filename)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                try:
+                    sync.download(it.kind, it.name, dest, overwrite=True)
+                    if not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+                        raise RuntimeError("下载回来的文件是空的")
+                except Exception as e:
+                    res["fail"].append((it.filename, "备份失败：%s" % e))
+                    emit(("log", "✘ 备份 %s 失败：%s" % (it.filename, e)))
+                else:
+                    pairs.append((dest, "CH/%s/%s"
+                                  % (E.KIND_DIRS[it.kind], it.filename)))
+            if len(pairs) != n:
+                res["aborted"] = True
+                emit(("log", "备份不完整（%d/%d）—— 设备上一张表都没有删除"
+                      % (len(pairs), n)))
+                emit(("progress", total, total, "已中止：备份未完成"))
+                return res
+
+            # ---- 阶段 2：原样打包，确认 zip 真的落盘 ----
+            emit(("progress", n, total, "打包备份…"))
+            try:
+                path = B.backup_files(
+                    pairs, app_dir=self.backup_app_dir, tag="pre-delete",
+                    reason="删除设备上的 %d 张频道表之前，先保存原文" % n)
+                if not path or not os.path.isfile(path):
+                    raise RuntimeError("备份 zip 没有生成")
+            except Exception as e:
+                res["aborted"] = True
+                res["fail"].append(("备份", str(e)))
+                emit(("log", "✘ 打包备份失败：%s —— 设备上一张表都没有删除" % e))
+                emit(("progress", total, total, "已中止：备份未生成"))
+                return res
+            res["backup"] = path
+            emit(("log", "删除前备份已保存：%s" % path))
+
+            # ---- 阶段 3：备份在手，才逐张删除 ----
+            for j, it in enumerate(items):
+                emit(("progress", n + 1 + j, total, "删除 %s（%d/%d）"
+                      % (it.filename, j + 1, n)))
+                try:
+                    sync.remove(it.kind, it.name)
+                except Exception as e:
+                    res["fail"].append((it.filename, str(e)))
+                    emit(("log", "✘ 删除失败 %s：%s（表仍在设备上，备份已保存）"
+                          % (it.filename, e)))
+                else:
+                    res["ok"] += 1
+                    self.device.pop(it.key(), None)
+                    emit(("log", "✖ 已从设备删除 %s · %s"
+                          % (KIND_LABEL[it.kind], it.filename)))
+            emit(("progress", total, total, "完成"))
+            return res
+        finally:
+            if sync is not None:
+                self._close(sync)
+            shutil.rmtree(tmp, ignore_errors=True)
 
     # ---------------------------------------------------------- 内容对比
     def compare(self, item, emit):
@@ -498,6 +591,80 @@ def _compare_verdict(a, b, error):
     return "粗判一致"
 
 
+# ============================================================ 删除确认框
+class DeleteConfirmDialog(tk.Toplevel):
+    """删除设备表的二次确认 —— 列清单、讲清备份与恢复、必须勾选才放行。
+
+    设备侧没有"撤销"命令，只靠一个 Yes/No 太容易点错，所以这里要求用户
+    先看完清单并主动勾一次。`confirmed` 为 True 调用方才允许开工。
+    """
+
+    def __init__(self, parent, items):
+        tk.Toplevel.__init__(self, parent)
+        self.confirmed = False
+        self.items = list(items)
+        self.title("删除设备上的频道表")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda e: self._cancel())
+
+        f = ttk.Frame(self, padding=(16, 12))
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="警告：将从仪器上永久删除以下 %d 张频道表，不可撤销。"
+                  % len(self.items), foreground=DANGER,
+                  font=("TkDefaultFont", 10, "bold"),
+                  wraplength=470, justify="left").pack(anchor="w", pady=(0, 8))
+
+        shown = self.items[:8]
+        box = tk.Listbox(f, height=min(8, max(3, len(shown))), width=52,
+                         selectmode="none", exportselection=False,
+                         **theme.listbox_opts())
+        for it in shown:
+            box.insert("end", "  %s · %s"
+                       % (KIND_LABEL[it.kind], it.filename))
+        box.pack(fill="x")
+        if len(self.items) > len(shown):
+            ttk.Label(f, text="（只列前 8 张，共 %d 张）" % len(self.items),
+                      foreground=HINT).pack(anchor="w")
+
+        ttk.Separator(f).pack(fill="x", pady=10)
+        for line in (
+                "删除前会先把每一张表按原样下载下来，打包备份到",
+                "bak/CH-<时间>-pre-delete.zip（和频道表备份同一目录）。",
+                "任何一张下载或打包失败，程序会立即中止，一张都不删。",
+                "恢复：频道表管理 → 还原备份 → 选这份 zip 还原到本地，",
+                "再用本窗口把表上传回设备。"):
+            ttk.Label(f, text=line, justify="left", wraplength=470,
+                      foreground=HINT).pack(anchor="w", pady=1)
+
+        self.ack = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f, text="我已核对清单，确认删除以上 %d 张表" % len(self.items),
+            variable=self.ack, command=self._on_ack).pack(
+                anchor="w", pady=(12, 4))
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(6, 0))
+        self.ok_btn = ttk.Button(bar, text="删除并备份", state="disabled",
+                                 command=self._ok)
+        self.ok_btn.pack(side="right")
+        ttk.Button(bar, text="取消", command=self._cancel).pack(
+            side="right", padx=6)
+        self.grab_set()
+
+    def _on_ack(self):
+        self.ok_btn.configure(state="normal" if self.ack.get() else "disabled")
+
+    def _ok(self):
+        self.confirmed = True
+        self.destroy()
+
+    def _cancel(self):
+        self.confirmed = False
+        self.destroy()
+
+
 # ============================================================ 主窗口
 class SyncWindow(tk.Toplevel):
     """与设备同步：打开即连接 → 读设备表 → 左右对照 → 中间操作。"""
@@ -509,7 +676,9 @@ class SyncWindow(tk.Toplevel):
         self.on_close = on_close
         self.title("与设备同步")
         self.geometry("1180x780")
-        self.minsize(1060, 660)
+        # 🔴 中栏现在有「删除选中…」这一组，请求高度 489px；加上顶栏 / 进度 /
+        #    日志 / 状态栏共 233px = 722px。最小高度低于 740 会把中栏底部裁掉。
+        self.minsize(1060, 740)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.transient(master)
 
@@ -670,15 +839,23 @@ class SyncWindow(tk.Toplevel):
             command=lambda: self.on_all("up"))
         self.buttons["up_all"].pack(pady=2)
 
-        ttk.Separator(mid).pack(fill="x", pady=12)
+        ttk.Separator(mid).pack(fill="x", pady=10)
+        self.buttons["remove"] = ttk.Button(
+            mid, text="删除选中…", width=15, command=self.on_remove)
+        self.buttons["remove"].pack(pady=2)
+        ttk.Label(mid, text="只删设备侧选中的表\n删除前自动备份",
+                  foreground=DANGER, justify="left").pack(
+                      anchor="w", pady=(2, 0))
+
+        ttk.Separator(mid).pack(fill="x", pady=10)
         ttk.Label(mid, text="标记", foreground=HINT).pack(anchor="w")
         for txt in ("=  两侧同名", "+  仅本地有", ">  仅设备有"):
             ttk.Label(mid, text=txt, foreground=HINT,
                       justify="left").pack(anchor="w", pady=1)
-        ttk.Label(mid, text="\n选一侧会自动清掉\n另一侧的选择，\n按钮随之启用。\n\n"
-                            "同名不代表内容\n相同，要看内容\n点「对比…」。",
+        ttk.Label(mid, text="\n选一侧自动清掉\n另一侧的选择。\n"
+                            "同名不代表内容\n相同，点「对比…」。",
                   justify="left", foreground=HINT).pack(
-                      anchor="w", pady=(10, 0))
+                      anchor="w", pady=(8, 0))
 
     # ------------------------------------------------------------ 小工具
     def _log(self, msg):
@@ -823,6 +1000,8 @@ class SyncWindow(tk.Toplevel):
             "up_all": conn and not busy and any(
                 status_of(k, self.backend.local, self.backend.device) == STATUS_LOCAL
                 for k in self.backend.local),
+            # 🔴 删除只认设备侧的选中项；本地侧选中、离线、忙碌时一律禁用
+            "remove": conn and not busy and ndev > 0,
         }
         for name, ok in state.items():
             self.buttons[name].configure(state="normal" if ok else "disabled")
@@ -851,6 +1030,9 @@ class SyncWindow(tk.Toplevel):
                       command=self.on_download if side == "device"
                       else self.on_upload)
         m.add_command(label="对比同名表", command=self.on_compare)
+        if side == "device":
+            m.add_separator()
+            m.add_command(label="删除选中的表…", command=self.on_remove)
         m.tk_popup(ev.x_root, ev.y_root)
 
     def _set_busy(self, on):
@@ -933,6 +1115,8 @@ class SyncWindow(tk.Toplevel):
             payload = ev[1]
             if isinstance(payload, tuple) and payload[0] == "compare":
                 CompareDialog(self, payload[1])
+            elif isinstance(payload, tuple) and payload[0] == "remove":
+                self._on_remove_result(payload[1])
             elif isinstance(payload, tuple) and payload[0] == "task":
                 _, verb, res = payload
                 ok, bad = res.get("ok", 0), res.get("fail", [])
@@ -1143,10 +1327,69 @@ class SyncWindow(tk.Toplevel):
         self._log("对比 %s（临时读取设备上的表）" % sel[0].filename)
         self._start(self._compare_job, sel[0])
 
+    # ------------------------------------------------------------ 删除设备表
+    def _ask_delete(self, items):
+        """确认框单独成方法：测试可桩掉，不必真弹模态框。"""
+        dlg = DeleteConfirmDialog(self, items)
+        self.wait_window(dlg)
+        return dlg.confirmed
+
+    def on_remove(self):
+        if not self.connected:
+            return messagebox.showinfo(
+                "删除", "要先连上设备才能删除设备上的表", parent=self)
+        items = self._selected("device")
+        if not items:
+            return messagebox.showinfo(
+                "删除", "先在右边选设备上的表（本地表不受影响）", parent=self)
+        if self.busy:
+            return
+        if not self._ask_delete(items):
+            self._log("取消删除（没有动设备上的任何表）")
+            return
+        self._log("准备删除设备上的 %d 张表：先备份，备份不成功就一张都不删"
+                  % len(items))
+        self._start(self._remove_job, items)
+
+    def _on_remove_result(self, res):
+        ok, bad = res.get("ok", 0), res.get("fail", [])
+        path = res.get("backup")
+        if res.get("aborted"):
+            self.status_var.set("已中止：备份未完成，设备上一张表都没有删除")
+            self._log("已中止：备份未完成，设备上一张表都没有删除")
+            lines = ["删除前的备份没有完成，为安全起见设备上一张表都没有删除。",
+                     "", "失败原因："]
+            lines += ["  %s —— %s" % (n, e) for n, e in bad[:8]]
+            lines += ["", "可点「刷新设备 F5」核对清单后再重试。"]
+            messagebox.showerror("未执行删除", "\n".join(lines), parent=self)
+            return
+        self.status_var.set("删除完成：成功 %d 张，失败 %d 张%s"
+                            % (ok, len(bad), " · 已备份" if path else ""))
+        self._log("删除完成：成功 %d 张，失败 %d 张" % (ok, len(bad)))
+        self._refresh_lists()
+        if ok:
+            self._notify()
+        if path:
+            self._log("删除前备份：%s" % path)
+            messagebox.showinfo(
+                "删除完成",
+                "已从设备删除 %d 张表。\n\n删除前的原文备份：\n%s\n\n"
+                "恢复：频道表管理 → 还原备份 → 选这份 zip 还原到本地，"
+                "再用本窗口上传回设备。" % (ok, path), parent=self)
+        if bad:
+            lines = ["成功 %d 张，失败 %d 张（失败的表仍在设备上）"
+                     % (ok, len(bad)), ""]
+            lines += ["  %s —— %s" % (n, e) for n, e in bad]
+            messagebox.showwarning("删除结果（部分失败）", "\n".join(lines),
+                                   parent=self)
+
     def _task_job(self, direction, items, verb, emit):
         res = (self.backend.download(items, emit) if direction == "down"
                else self.backend.upload(items, emit))
         return ("task", verb, res)
+
+    def _remove_job(self, items, emit):
+        return ("remove", self.backend.remove_selected(items, emit))
 
     def _compare_job(self, item, emit):
         return ("compare", self.backend.compare(item, emit))

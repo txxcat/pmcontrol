@@ -6,18 +6,19 @@
 > **目标仪器**：RANGERNeo 4 — High class field strength meter and spectrum analyzer with 4K decoder
 > （固件 `*VER 31.17`，Telnet 端口 `2222`）
 
-**当前版本 v1.4.0（2026-11-04）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
+**当前版本 v1.5.0（2026-11-04）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
 运行起来可在「设置 → 关于」里看到版本号、更新日期与项目地址。
-**v1.3.1 已通过 RANGERNeo 4 真机验证**（固件 31.17）；v1.4.0 的「与设备同步」窗口
-改动尚未做真机验证，请在正式使用前先拿一台仪器试一遍下载 / 上传。
+**v1.3.1 已通过 RANGERNeo 4 真机验证**（固件 31.17）；v1.4.0 起的「与设备同步」窗口
+改动（含 v1.5.0 新增的删除设备表）**尚未做真机验证**，请在正式使用前先拿一台仪器
+试一遍下载 / 上传 / 删除。
 
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
 → `pmcontrol-v1.3.1-win64.zip`（约 26 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
-> ⚠️ 打包版目前仍是 **v1.3.1**；v1.4.0 的同步窗口改动只在源码里，
-> 下次发版才会打进 exe。用源码运行请用带 Tk 的 Python 3.12。
+> ⚠️ 打包版目前仍是 **v1.3.1**；v1.4.0 起的同步窗口改动（含 v1.5.0 的删除设备表）
+> 只在源码里，下次发版才会打进 exe。用源码运行请用带 Tk 的 Python 3.12。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
 - 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
@@ -126,7 +127,13 @@ XML 手工改，改完还不知道仪器认不认。
     重复上传会被自动改名
   - 「刷新本地」只重扫 `CH/`（纯本地、离线也能用），「刷新设备 F5」才联网重读清单 ——
     频道表管理窗口可能在本窗口开着时另存 / 删除 / 还原备份，不刷新会拿着过期清单
-  - ⚠️ **不提供删除设备表的入口**：设备侧没有回滚命令
+  - **删除设备表（v1.5.0 起）只删选中的**：中栏「删除选中…」和设备侧右键菜单
+    都只在**设备侧有选中项**时可用，没有「删除全部」入口。删除前要过一层
+    **勾选确认**（列出表名、说明备份位置与恢复办法）；执行时先把每一张表按原样
+    下载、打成 `bak/CH-<时间>-pre-delete.zip`，**备份成功才逐张删除**，
+    任何一张下载 / 打包失败就立刻中止、一张都不删。备份用 `backup_files()`
+    不做 XML 解析 —— 设备表若被解析器跳过，等于没备份却把表删了。
+    恢复：频道表管理 → 还原备份 → 选这份 zip 还原到本地，再用本窗口上传回设备
   - 底层仍是 `*?INSTALLATION` 命令族 + SFTP（22）：下载优先单表，固件不认就降级
     整装 ZIP；分块 CRC 手册没写，程序从第一块数据反推；31.17 实测 Telnet 单表
     上传可能回 NAK，建议设置里把传输方式改成 SFTP
@@ -298,7 +305,7 @@ python _test_theme.py             # 深色模式配色对比度 / 滑动开关 /
 python _test_version.py           # 版本号格式/唯一来源 / 关于页 / 多选选择框（Ctrl+Shift+Ctrl+A）
 python _test_plan_edit.py         # 频道表编辑（未知字段保留/模拟+2.75/增删改）+ zip 备份还原 + 窗口
 python _test_plan_sync.py         # 与设备同步：单表路线 / 固件不认时降级整装 ZIP / CRC 反推 / 转义
-python _test_sync_gui.py          # 同步窗口：分列 / 端口预检 / 下载上传闭环 / 无删除入口
+python _test_sync_gui.py          # 同步窗口：分列 / 端口预检 / 下载上传闭环 / 删除前备份
 ```
 
 ### 真机上先跑一次协议探测
@@ -351,10 +358,10 @@ CH/
 | `promax_plan_write.py` | 写 Promax 仪器格式 XML / 读结果文件（也可单独当命令行用） |
 | `promax_plan_edit.py` | 频道表读写与增删改（就地改 XML，保住未知字段） |
 | `promax_plan_editor_gui.py` | 频道表管理窗口（编辑 / 备份 / 与设备同步） |
-| `promax_plan_backup.py` | 频道表 zip 备份与还原（滚动 10 份，放 `bak/`） |
+| `promax_plan_backup.py` | 频道表 zip 备份与还原（滚动 10 份，放 `bak/`）；`backup_files()` 按原样字节备份指定文件，供删除设备表前保存原文 |
 | `promax_fileio.py` | INSTALLATION 文件传输（裸字节流 + 分块 + CRC 反推 + IAC 转义） |
 | `promax_plan_sync.py` | 同步策略层（单表为主 / 整装 ZIP 兜底 / 上传拒绝降级） |
-| `promax_sync_gui.py` | 与设备同步窗口（预检 / 射频·卫星分列对照 / 下载上传 / 内容对比） |
+| `promax_sync_gui.py` | 与设备同步窗口（预检 / 射频·卫星分列对照 / 下载上传 / 内容对比 / 删除选中且先备份） |
 | `promax_plan_scan.py` | 命令行版（无 GUI） |
 | `mock_promax_server.py` | 仪器模拟器 |
 | `_selftest_mock.py` | 协议级自检（对模拟器跑） |
@@ -371,7 +378,7 @@ CH/
 | `_test_version.py` | 版本号格式与唯一来源 / 「关于」页内容 / 多选选择框（extended 规则 + Ctrl+A + 预选） |
 | `_test_plan_edit.py` | 频道表编辑器测试（未知字段保留 / 模拟 +2.75 / 增删改 + zip 备份还原 + 窗口全链路） |
 | `_test_plan_sync.py` | 设备同步集成测试（单表 / 降级整装 / IAC 转义 / CRC 换算法，对着模拟器跑） |
-| `_test_sync_gui.py` | 同步窗口测试（三态标记 / 预检分类 / 后端闭环 / 四个分列列表 / 选中互斥） |
+| `_test_sync_gui.py` | 同步窗口测试（三态标记 / 预检分类 / 下载上传闭环 / 删除前备份与失败不删 / 四个分列列表 / 确认框） |
 | `_probe_io.py` | **真机**协议探测脚本（只读；`--upload` 才写，读完即删） |
 | `_shot_settings.py` | 生成 README 用的三张界面截图（用演示配置，不碰真实数据） |
 | `CH/TER`, `CH/SAT` | 频道表目录（仅 DEMO-\* 入库） |

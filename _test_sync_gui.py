@@ -11,7 +11,9 @@ import shutil
 import sys
 import tempfile
 import tkinter as tk
+import zipfile
 
+import promax_plan_backup as B
 import promax_plan_edit as E
 import promax_plan_editor_gui as EG
 import promax_sync_gui as SG
@@ -59,6 +61,12 @@ class FakeSync(object):
         self.log = lambda m: None
         self.uploaded = []
         self.downloaded = []
+        self.removed = []
+        self.events = []
+        # 故障注入：按规范化表名匹配
+        self.fail_download = set()
+        self.empty_download = set()
+        self.fail_remove = set()
 
     def connect(self):
         return self
@@ -70,10 +78,16 @@ class FakeSync(object):
         return list(self.names.get(kind, []))
 
     def download(self, kind, name, dest=None, overwrite=True):
-        dest = dest or E.plan_path(self.src, kind, SG.plain(name))
+        key = SG.plain(name)
+        self.events.append(("download", key))
+        if key in self.fail_download:
+            raise RuntimeError("模拟：设备读取失败")
+        dest = dest or E.plan_path(self.src, kind, key)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
+        body = "" if key in self.empty_download else (
+            XML % (key, CH % 0 + CH % 1 + CH % 2))
         with open(dest, "w", encoding="utf-8") as f:
-            f.write(XML % (SG.plain(name), CH % 0 + CH % 1 + CH % 2))
+            f.write(body)
         self.downloaded.append((kind, name, dest))
         return dest
 
@@ -82,9 +96,17 @@ class FakeSync(object):
         # 设备遇到同名不会覆盖，会自动改名（真机行为）
         return SG.plain(name) + "_2"
 
+    def remove(self, kind, name):
+        key = SG.plain(name)
+        self.events.append(("remove", key))
+        if key in self.fail_remove:
+            raise RuntimeError("模拟：设备拒绝删除")
+        self.removed.append((kind, name))
+        return True
+
 
 def part_data():
-    """纯数据：规范化 / 三态 / 行文本 / 分组 / 没有删除入口。"""
+    """纯数据：规范化 / 三态 / 行文本 / 分组 / 删除入口只有「选中项」。"""
     check("plain 去掉 .XML", SG.plain("DEMO-A.XML") == "DEMO-A")
     check("plain 兼容小写", SG.plain("DEMO-A.xml") == "DEMO-A")
     check("plain 不动不带后缀的", SG.plain("DEMO-A") == "DEMO-A")
@@ -110,7 +132,11 @@ def part_data():
     g = SG.group_kinds(merged)
     check("分列：射频 2 / 卫星 1（同名 key 合并）",
           len(g["TER"]) == 2 and len(g["SAT"]) == 1)
-    check("不提供删除设备表的入口", not hasattr(SG.SyncBackend, "remove"))
+    check("删除只提供「选中项」方法", hasattr(SG.SyncBackend, "remove_selected"))
+    check("没有「删除全部」的后端入口",
+          not hasattr(SG.SyncBackend, "remove_all")
+          and not hasattr(SG.SyncBackend, "remove"))
+    check("删除有专用确认框", hasattr(SG, "DeleteConfirmDialog"))
 
 
 def part_backend():
@@ -195,8 +221,192 @@ def part_backend():
         shutil.rmtree(src, ignore_errors=True)
 
 
+def part_backup_files():
+    """backup_files：原样字节、不解析、manifest 带 SHA256、滚动保留。"""
+    d = tempfile.mkdtemp(prefix="pm_synctg_bk_")
+    try:
+        # 故意用本地解析器认不出的内容：backup_plans 会跳过，backup_files 必须保住
+        raw = b'<?xml version="1.0"?><NOT-LOCAL-FORMAT foo="1"/>'
+        p = os.path.join(d, "raw.dat")
+        with open(p, "wb") as f:
+            f.write(raw)
+        z = B.backup_files([(p, "CH/TER/DEMO-Raw.XML")], app_dir=d,
+                           tag="pre-delete", reason="删除设备表前备份 1 张")
+        check("备份 zip 已落盘", bool(z) and os.path.isfile(z))
+        check("备份文件名带 pre-delete",
+              z and "pre-delete" in os.path.basename(z))
+        with zipfile.ZipFile(z) as f:
+            names = f.namelist()
+            check("不解析也照样备份",
+                  "CH/TER/DEMO-Raw.XML" in names)
+            check("内容与原字节一致",
+                  f.read("CH/TER/DEMO-Raw.XML") == raw)
+            man = f.read(B.MANIFEST).decode("utf-8", "replace")
+            check("manifest 里有 SHA256", "SHA256" in man)
+            check("manifest 里写了触发原因", "删除设备表前备份" in man)
+            check("manifest 里写了恢复办法", "还原备份" in man)
+        check("空列表不生成 zip", B.backup_files([], app_dir=d) is None)
+        check("不存在的文件被忽略",
+              B.backup_files([(os.path.join(d, "nope"), "CH/TER/X.XML")],
+                             app_dir=d) is None)
+        for i in range(12):
+            B.backup_files([(p, "CH/TER/DEMO-Raw.XML")], app_dir=d,
+                           tag="r%d" % i)
+        check("滚动只留最近 10 份",
+              len(B.list_backups(d)) == B.BACKUP_KEEP)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def part_remove():
+    """删除设备表：备份是前置条件 / 只删选中 / 失败一张都不删。"""
+    src = tempfile.mkdtemp(prefix="pm_synctg_del_")
+    made = []
+    ctl = {"fail_download": set(), "empty_download": set(),
+           "fail_remove": set()}
+
+    def factory():
+        s = FakeSync(src)
+        s.fail_download = set(ctl["fail_download"])
+        s.empty_download = set(ctl["empty_download"])
+        s.fail_remove = set(ctl["fail_remove"])
+        made.append(s)
+        return s
+
+    emit = lambda x: None
+    TWO = (("TER", "DEMO-B"), ("SAT", "DEMO-SAT"))
+
+    def fresh():
+        b = SG.SyncBackend(factory, src, backup_app_dir=src)
+        b.fetch_device(emit)
+        return b
+
+    def pick(b, keys):
+        return [b.device[k] for k in keys]
+
+    try:
+        # ---- 1. 正常：先全部备份，再删除 ----
+        b = fresh()
+        r = b.remove_selected(pick(b, TWO), emit)
+        s = made[-1]
+        check("删除成功 2 张",
+              r["ok"] == 2 and not r["fail"] and not r["aborted"])
+        check("删除前备份已生成",
+              bool(r["backup"]) and os.path.isfile(r["backup"]))
+        with zipfile.ZipFile(r["backup"]) as z:
+            names = z.namelist()
+            check("备份里两张表都在",
+                  "CH/TER/DEMO-B.XML" in names
+                  and "CH/SAT/DEMO-SAT.XML" in names)
+            check("备份保留了设备原文",
+                  z.read("CH/TER/DEMO-B.XML").startswith(b"<?xml"))
+        kinds = [e[0] for e in s.events]
+        dls = [i for i, k in enumerate(kinds) if k == "download"]
+        rms = [i for i, k in enumerate(kinds) if k == "remove"]
+        check("两张都先下载后删除",
+              len(dls) == 2 and len(rms) == 2 and max(dls) < min(rms))
+        check("删掉的表移出设备清单",
+              ("TER", "DEMO-B") not in b.device
+              and ("SAT", "DEMO-SAT") not in b.device)
+        check("没选中的表留在设备清单", ("TER", "DEMO-C") in b.device)
+        check("删除会话用完关掉", s.closed)
+
+        # ---- 2. 任一表下载失败 → 一张都不删 ----
+        ctl["fail_download"] = {"DEMO-B"}
+        b = fresh()
+        r = b.remove_selected(pick(b, TWO), emit)
+        check("下载失败 → aborted", r["aborted"] is True)
+        check("下载失败 → 没删成功也没生成备份",
+              r["ok"] == 0 and r["backup"] is None)
+        check("下载失败 → 设备上一张都没删", not made[-1].removed)
+        check("下载失败 → 清单不变",
+              ("TER", "DEMO-B") in b.device
+              and ("SAT", "DEMO-SAT") in b.device)
+        check("失败原因写明是备份失败",
+              any("备份失败" in e for _, e in r["fail"]))
+
+        # ---- 3. 下载到空文件同样中止（不能拿空文件当备份）----
+        ctl["fail_download"] = set()
+        ctl["empty_download"] = {"DEMO-SAT"}
+        b = fresh()
+        r = b.remove_selected(pick(b, TWO), emit)
+        check("空文件也算备份失败", r["aborted"] and r["backup"] is None)
+        check("空文件 → 一张都没删", not made[-1].removed)
+
+        # ---- 4. 打包失败 → 一张都不删 ----
+        ctl["empty_download"] = set()
+        orig = SG.B.backup_files
+
+        def boom(*a, **k):
+            raise OSError("模拟：磁盘满")
+
+        try:
+            SG.B.backup_files = boom
+            b = fresh()
+            r = b.remove_selected(pick(b, TWO), emit)
+        finally:
+            SG.B.backup_files = orig
+        check("打包失败 → aborted", r["aborted"] is True)
+        check("打包失败 → 一张都没删", not made[-1].removed)
+        check("打包失败 → 清单不变", ("TER", "DEMO-B") in b.device)
+
+        # ---- 5. 备份在手，单张删除失败不影响其余 ----
+        ctl["fail_remove"] = {"DEMO-B"}
+        b = fresh()
+        r = b.remove_selected(pick(b, TWO), emit)
+        check("部分失败：成功 1 张 / 失败 1 张",
+              r["ok"] == 1 and len(r["fail"]) == 1)
+        check("部分失败仍有备份",
+              bool(r["backup"]) and os.path.isfile(r["backup"]))
+        check("删失败的表仍在清单", ("TER", "DEMO-B") in b.device)
+        check("删成功的表移出清单", ("SAT", "DEMO-SAT") not in b.device)
+
+        # ---- 6. 只删选中的那一张 ----
+        ctl["fail_remove"] = set()
+        b = fresh()
+        r = b.remove_selected(pick(b, [("TER", "DEMO-B")]), emit)
+        check("只删选中的 1 张",
+              len(made[-1].removed) == 1 and r["ok"] == 1)
+        check("其余两张没被碰",
+              ("TER", "DEMO-C") in b.device
+              and ("SAT", "DEMO-SAT") in b.device)
+        empty = b.remove_selected([], emit)
+        check("空选择不动设备", empty["ok"] == 0 and not empty["aborted"])
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def part_confirm():
+    """删除确认框：必须主动勾选才放行，取消不置 confirmed。"""
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        items = [SG.PlanItem("TER", "DEMO-A"), SG.PlanItem("SAT", "DEMO-S")]
+        d = SG.DeleteConfirmDialog(root, items)
+        check("确认框初始删除按钮禁用",
+              str(d.ok_btn.cget("state")) == "disabled")
+        d.ack.set(True)
+        d._on_ack()
+        check("勾选后删除按钮启用",
+              str(d.ok_btn.cget("state")) == "normal")
+        d._ok()
+        check("点删除 → confirmed", d.confirmed is True)
+        d2 = SG.DeleteConfirmDialog(root, items)
+        d2._cancel()
+        check("取消 → 不 confirmed", d2.confirmed is False)
+    except Exception as e:
+        check("确认框测试没抛异常", False, repr(e))
+    finally:
+        try:
+            if root is not None:
+                root.destroy()
+        except Exception:
+            pass
+
+
 def part_window():
-    """窗口结构：四个分列 Listbox、无删除按钮、选中互斥、刷新本地。"""
+    """窗口结构：四个分列 Listbox、删除按钮启用规则、选中互斥、刷新本地。"""
     src = tempfile.mkdtemp(prefix="pm_synctg_win_")
     root = None
     win = None
@@ -235,7 +445,9 @@ def part_window():
         check("设备射频列有表", win.lists[("device", "TER")].size() == 1)
         check("设备卫星列有表", win.lists[("device", "SAT")].size() == 1)
         labels = [str(b.cget("text")) for b in win.buttons.values()]
-        check("中间没有删除按钮", not any("删除" in x for x in labels))
+        check("中间有「删除选中…」按钮", "删除选中…" in labels)
+        check("没有「删除全部 / 删除所有」按钮",
+              not any(x in labels for x in ("全部删除", "删除所有", "清空设备")))
         check("中间有下载按钮", any("下载到本地" in x for x in labels))
         check("中间有上传按钮", any("上传到设备" in x for x in labels))
         check("左右都有刷新按钮",
@@ -243,15 +455,72 @@ def part_window():
                             for w in _all_buttons(win)]
               and any("刷新设备" in str(w.cget("text"))
                       for w in _all_buttons(win)))
+        check("没有选中时删除按钮禁用",
+              str(win.buttons["remove"].cget("state")) == "disabled")
 
-        # 选一侧 → 另一侧自动清空
+        # 中栏加了删除按钮后，最小窗口高度必须仍装得下全部按钮与图例
+        win.update_idletasks()
+        mid = win.buttons["remove"].master
+        chrome = sum(c.winfo_reqheight() for c in win.winfo_children()
+                     if c.winfo_class() in ("TFrame", "TLabel")
+                     and c is not mid.master)
+        check("最小窗口高度装得下中栏",
+              win.minsize()[1] >= mid.winfo_reqheight() + chrome,
+              "mid=%d chrome=%d min=%d" % (mid.winfo_reqheight(), chrome,
+                                           win.minsize()[1]))
+
+        # 选一侧 → 另一侧自动清空；删除按钮只认设备侧的选择
         win.lists[("local", "TER")].selection_set(0)
         win._on_pick("local")
+        check("只选本地时删除按钮禁用",
+              str(win.buttons["remove"].cget("state")) == "disabled")
         win.lists[("device", "TER")].selection_set(0)
         win._on_pick("device")
+        check("设备侧有选中时删除按钮启用",
+              str(win.buttons["remove"].cget("state")) == "normal")
         check("选设备侧会清掉本地侧的选择",
               not win.lists[("local", "TER")].curselection())
         check("设备侧选中仍在", bool(win.lists[("device", "TER")].curselection()))
+
+        # 右键菜单：只有设备侧给删除入口
+        win.menu.tk_popup = lambda x, y: None
+
+        class Ev(object):
+            x_root = y_root = 0
+            y = 5
+
+        def menu_labels(side, kind):
+            win._context(Ev(), side, kind, win.lists[(side, kind)])
+            out = []
+            for i in range(win.menu.index("end") + 1):
+                if win.menu.type(i) != "separator":
+                    out.append(str(win.menu.entrycget(i, "label")))
+            return out
+
+        check("设备侧右键有删除", any("删除" in x for x in
+                                     menu_labels("device", "TER")))
+        win.lists[("device", "TER")].selection_clear(0, "end")
+        win.lists[("local", "TER")].selection_set(0)
+        check("本地侧右键没有删除", not any("删除" in x for x in
+                                           menu_labels("local", "TER")))
+
+        # 取消确认 → 不启动任何后台任务
+        win._ask_delete = lambda items: False
+        win.lists[("local", "TER")].selection_clear(0, "end")
+        win.lists[("device", "TER")].selection_set(0)
+        win._on_pick("device")
+        win.on_remove()
+        check("取消删除后不进入 busy", not win.busy)
+
+        # 备份失败的结果：明确告知「一张都没删」
+        errs = []
+        SG.messagebox.showerror = lambda *a, **k: errs.append(a)
+        win._on_remove_result({"ok": 0, "fail": [("DEMO-B", "备份失败")],
+                               "backup": None, "aborted": True})
+        check("备份失败弹「未执行删除」",
+              any("未执行删除" in str(a) for a in errs))
+        check("备份失败状态栏说明没删表",
+              "一张表都没有删除" in win.status_var.get())
 
         # 刷新本地：目录里新增一张表，界面要跟着变
         write_plan(src, "TER", "DEMO-FRESH", 1)
@@ -339,6 +608,9 @@ def _all_buttons(w):
 def main():
     part_data()
     part_backend()
+    part_backup_files()
+    part_remove()
+    part_confirm()
     part_window()
     part_editor_entry()
     print("\n%s\n通过 %d / 失败 %d" % ("=" * 46, OK, BAD))
