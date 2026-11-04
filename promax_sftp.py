@@ -369,7 +369,13 @@ class PlanSFTP(object):
         """
         self.connect()
         kind = kind or E.kind_of_path(path)
-        name = (name or os.path.splitext(os.path.basename(path))[0]).strip()
+        # 🔴 上层可能传带 .XML 的名字（Telnet 单表命令只认带扩展名的写法）。
+        #    这里统一规范化成「不带扩展名的表名」：_remote_path() 会补回 .XML，
+        #    返回值也保持老约定（不带扩展名），否则 PlanSync.upload 的调用方
+        #    会拿到 "表A.XML" 这种和 device_plans() 对不上的名字。
+        name = (name or os.path.basename(path)).strip()
+        if name.upper().endswith(E.PLAN_EXT.upper()):
+            name = name[:-len(E.PLAN_EXT)]
         if not name:
             raise SftpError("上传的表名不能为空")
         if not os.path.isfile(path):

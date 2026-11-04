@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, ttk
 import promax_fileio as F
 import promax_plan_backup as B
 import promax_plan_edit as E
+import promax_sync_gui as SG          # 🔴 顶层导入：PyInstaller 才抓得到
 import promax_theme as theme
 
 HINT = theme.c("hint")           # 次要说明文字（深色下自动变浅灰）
@@ -173,20 +174,18 @@ class PlanEditorWindow(tk.Toplevel):
                   foreground=DANGER).pack(side="left", padx=8)
 
         # ---- 设备同步 ----
-        # 下载/上传都可多选：选择框用 selectmode="extended"，就是 Windows
-        # 资源管理器那套规则（Ctrl 加选、Shift 选段）。
+        # 🔴 一个窗口搞定：打开即做短超时端口预检 → 读设备清单 →
+        #    本地 / 设备并排（各自再分射频 / 卫星）→ 下载、上传、对比。
+        #    原来三个按钮不再摆在界面上；对应方法保留给工具栏 / 快捷键 / 测试，
+        #    新窗口的入口是 promax_sync_gui.SyncWindow。
         sync = ttk.LabelFrame(right, text="与设备同步", padding=6)
         sync.pack(fill="x", pady=(10, 0))
-        ttk.Button(sync, text="设备上的表…", command=self.show_device_plans
-                   ).pack(side="left")
-        ttk.Button(sync, text="从设备下载…", command=self.download_from_device
-                   ).pack(side="left", padx=4)
-        ttk.Button(sync, text="上传到设备…", command=self.upload_plans
+        ttk.Button(sync, text="与设备同步…", command=self.open_sync_window
                    ).pack(side="left")
         self.sync_var = tk.StringVar(value="")
         ttk.Label(sync, textvariable=self.sync_var,
                   foreground=HINT).pack(side="left", padx=10)
-        ttk.Label(sync, text="下载/上传支持多选（Ctrl / Shift）",
+        ttk.Label(sync, text="打开后自动读设备表 · 下载 / 上传支持多选（Ctrl / Shift）",
                   foreground=HINT).pack(side="left")
 
         # ---- 状态栏 ----
@@ -535,6 +534,33 @@ class PlanEditorWindow(tk.Toplevel):
         self._notify()
 
     # ------------------------------------------------------------ 设备同步
+    def open_sync_window(self):
+        """打开「与设备同步」窗口：连接 / 左右对照 / 下载 / 上传都在一屏里。
+
+        窗口自己管连接与后台线程，这里只负责挂进去、避免重复开窗，
+        以及关窗后重扫本窗口的两张表列表。
+        """
+        if self._busy:
+            return messagebox.showinfo("忙", "上一个同步任务还没结束", parent=self)
+        if not self.sync_factory:
+            return messagebox.showinfo(
+                "同步不可用", "当前没有配置仪器连接（顶栏 IP / 端口）",
+                parent=self)
+        try:
+            w = getattr(self, "_sync_win", None)
+            if w is not None and w.winfo_exists():
+                w.deiconify()
+                w.lift()
+                w.focus_set()
+                return
+        except Exception:
+            pass
+        self._sync_win = SG.SyncWindow(
+            self, sync_factory=self.sync_factory, source=self.source,
+            on_change=self._notify, on_close=self.refresh_lists)
+
+    # 下面四个方法是**旧入口**：原来对应界面上的三个按钮 + 工具栏
+    # 「上传当前表」。界面已换成单一窗口，但方法和测试都还在用，保留。
     def _need_sync(self):
         if not self.sync_factory:
             messagebox.showinfo("同步不可用",

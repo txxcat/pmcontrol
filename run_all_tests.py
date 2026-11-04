@@ -37,6 +37,7 @@ SUITES = [
     ("_test_platform.py",  "跨平台打开文件 / 文件名归属", True),
     ("_test_plan_edit.py", "频道表编辑 / zip 备份", True),
     ("_test_plan_sync.py", "与设备同步（模拟器四条路线）", True),
+    ("_test_sync_gui.py",  "同步窗口（分列/预检/下载上传/无删除）", True),
     ("_test_sftp.py",      "SFTP 路线（模拟器：发现/传/删/备）", True),
     ("_test_reconnect.py", "断线重连", True),
     ("_e2e_mock.py",       "端到端跑表（无断言）", False),
