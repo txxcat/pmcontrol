@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按 v1.2.x 的既成结构重新打 v1.3.1 发布包。
+"""按既成结构生成发布包（版本号从 promax_version.py 读，别再手改）。
 
 结构（与 v1.2.1 一致，不可平铺 —— 平铺后程序找不到 CH/TER）：
     pmcontrol/pmcontrol.exe
@@ -18,7 +18,9 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(ROOT, "dist")
-VER = "1.3.1"
+sys.path.insert(0, ROOT)
+import promax_version                    # 版本号唯一来源，发版时不再手改这里
+VER = promax_version.VERSION
 PREFIX = "pmcontrol"
 
 ITEMS = [

@@ -8,17 +8,19 @@
 
 **当前版本 v1.5.0（2026-11-04）** —— 程序内的版本号在 `promax_version.py`（唯一来源），
 运行起来可在「设置 → 关于」里看到版本号、更新日期与项目地址。
-**v1.3.1 已通过 RANGERNeo 4 真机验证**（固件 31.17）；v1.4.0 起的「与设备同步」窗口
-改动（含 v1.5.0 新增的删除设备表）**尚未做真机验证**，请在正式使用前先拿一台仪器
-试一遍下载 / 上传 / 删除。
+**v1.3.1 已通过 RANGERNeo 4 真机验证**（固件 31.17）；v1.5.0 打包版里
+v1.4.0 起的「与设备同步」窗口改动（含 v1.5.0 新增的删除设备表）**尚未做真机验证**，
+正式使用前请先拿一台仪器试一遍下载 / 上传 / 删除；计划数日内补测，验证通过后
+会同步更新本说明与 Release 正文。
 
 ## 下载（Windows 免安装）
 
 不想装 Python 的同学直接下打包版：**[Releases 页面](https://github.com/txxcat/pmcontrol/releases/latest)**
-→ `pmcontrol-v1.3.1-win64.zip`（约 26 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
+→ `pmcontrol-v1.5.0-win64.zip`（约 26.1 MB）→ 解压 → 进 `pmcontrol` 文件夹双击 `pmcontrol.exe`。
 
-> ⚠️ 打包版目前仍是 **v1.3.1**；v1.4.0 起的同步窗口改动（含 v1.5.0 的删除设备表）
-> 只在源码里，下次发版才会打进 exe。用源码运行请用带 Tk 的 Python 3.12。
+> ⚠️ v1.5.0 已打包，但「与设备同步」窗口（含删除设备表）**尚未真机验证**，详见上文；
+> 需要已验证的稳定版请到 Releases 里取 `pmcontrol-v1.3.1-win64.zip`。
+> 用源码运行请用带 Tk 的 Python 3.12。
 
 - 已内置演示预设与演示频道表，**无需仪器即可体验完整流程**
 - 单文件程序，**不需要** `_internal` 之类的附加文件夹；但 `CH` 频道表文件夹
@@ -240,7 +242,7 @@ pip install pyinstaller
 pyinstaller -w -F -i "PM Ranger Neo4.png" -n pmcontrol promax_plan_gui.py
 ```
 
-`-F` 是**单文件**模式，产物只有 `dist/pmcontrol.exe`（约 23 MB），运行时自动解压到
+`-F` 是**单文件**模式，产物只有 `dist/pmcontrol.exe`（约 26 MB），运行时自动解压到
 临时目录、退出后清理；首启因此比文件夹模式慢 2~3 秒。想换成文件夹模式（启动快、
 体积大、但必须整包分发）把 `-F` 换成 `-D`，产物在 `dist/pmcontrol/`（约 33 MB）。
 
@@ -314,8 +316,8 @@ python _test_sync_gui.py          # 同步窗口：分列 / 端口预检 / 下�
 只能在真机上问一遍。把 `_probe_io.py` 拷到仪器旁边跑：
 
 ```bash
-python _probe_io.py --ip 192.168.1.100              # 只读，不动仪器上的东西
-python _probe_io.py --ip 192.168.1.100 --upload     # 额外测上传（临时建一张 ZZ-PROBE-* 表，读完即删）
+python _probe_io.py --ip 192.0.2.10              # 只读，不动仪器上的东西
+python _probe_io.py --ip 192.0.2.10 --upload     # 额外测上传（临时建一张 ZZ-PROBE-* 表，读完即删）
 # 报告里会写明「序号基准 = 0 基 / 1 基」，并逐条留下原始字节
 ```
 
